@@ -1,0 +1,7 @@
+#cloud-config
+disable_root: false
+users:
+  - name: root
+    ssh_authorized_keys:
+      - REPLACE_WITH_CONTENTS_OF_lab_key.pub
+ssh_pwauth: false

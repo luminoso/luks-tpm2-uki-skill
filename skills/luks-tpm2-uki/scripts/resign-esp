@@ -1,0 +1,26 @@
+#!/bin/sh
+# Copy updated boot files to the ESP (COPY), then leave every boot file in FILES with exactly one
+# signature: yours. Install as /usr/local/sbin/resign-esp (mode 0755) and run it after every package
+# operation, e.g. /etc/apt/apt.conf.d/99-resign-esp:
+#   DPkg::Post-Invoke { "if [ -x /usr/local/sbin/resign-esp ]; then /usr/local/sbin/resign-esp; fi"; };
+# Configuration: /etc/kernel/esp-signing.conf (see esp-signing.conf.example).
+# Why strip instead of adding a signature: once the distribution's certificate is denied in shim
+# (MokListX), a file that still carries it is refused even with yours next to it. sbctl sign adds.
+set -eu
+. /etc/kernel/esp-signing.conf
+mkdir -p /var/lib/resign-esp
+for pair in $COPY; do
+  src=${pair%%:*} dst=${pair#*:} stamp=/var/lib/resign-esp/$(basename "${pair#*:}").sha256
+  sum=$(sha256sum < "$src")
+  if [ ! -f "$dst" ] || [ "$(cat "$stamp" 2>/dev/null)" != "$sum" ]; then
+    cp "$src" "$dst" && echo "$sum" > "$stamp" && echo "resign-esp: copied $src"
+  fi
+done
+for f in $FILES; do
+  [ -f "$f" ] || continue
+  n=$(sbverify --list "$f" 2>/dev/null | grep -c '^signature [0-9]') || true
+  if [ "$n" = 1 ] && sbverify --cert "$CERT" "$f" >/dev/null 2>&1; then continue; fi
+  while sbattach --remove "$f" >/dev/null 2>&1; do :; done
+  sbsign --key "$KEY" --cert "$CERT" --output "$f" "$f" >/dev/null 2>&1
+  echo "resign-esp: signed $f"
+done
