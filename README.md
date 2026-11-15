@@ -25,7 +25,7 @@ The agent audits first, read-only, and hands you every root command. Changes com
 
 ## Evidence
 
-Every step ran in a QEMU/OVMF/swtpm VM (`testbench/`), end to end from a new PC's factory state, for both Secure Boot options (own keys without shim, Microsoft keys with shim), and on Debian testing: kernel upgrades without resealing, DKMS modules, package updates, attacks (tampered UKI, injected command line, a Debian kernel with an attacker's initrd replaying PCRs, a forced initrd failure), a broken kernel falling back through boot counting, a firmware update with and without preparation, and the recovery key. `.github/workflows/e2e.yml` runs the same in GitHub Actions, weekly and on demand. The audit checks come from a real host.
+Every step ran in a QEMU/OVMF/swtpm VM (`testbench/`), end to end from a new PC's factory state, for both Secure Boot options (own keys without shim, Microsoft keys with shim), and on Debian testing: kernel upgrades without resealing, DKMS modules, package updates, attacks (tampered UKI, injected command line, a Debian kernel with an attacker's initrd replaying PCRs, a forced initrd failure), a broken kernel falling back through boot counting, a firmware update with and without preparation, and the recovery key. `.github/workflows/e2e.yml` runs the same in GitHub Actions, monthly and on demand. The audit checks come from a real host.
 
 Benchmark (`evals/`): three scenarios, scored by hand, without → with the skill.
 

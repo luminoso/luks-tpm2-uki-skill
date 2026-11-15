@@ -9,7 +9,7 @@ on:
         description: Debian suite for the target (trixie, or forky for testing)
         default: trixie
   schedule:
-    - cron: "17 3 * * 1"     # weekly: trixie and testing
+    - cron: "17 3 1 * *"     # monthly: trixie and testing
 
 jobs:
   e2e:
