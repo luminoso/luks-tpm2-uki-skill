@@ -42,3 +42,7 @@ evals/                  scenarios, rubric, results
 ```
 
 Not tested: real laptops, GPU option ROMs, a real firmware update, distributions other than Debian and Proxmox.
+
+## License
+
+MIT. See `LICENSE`.
