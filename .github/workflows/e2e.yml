@@ -38,6 +38,9 @@ jobs:
           docker run --rm --device /dev/kvm -v "$PWD:/w" -w /w/testbench \
             -e OPTION=${{ matrix.chain.option }} -e SHIM=${{ matrix.chain.shim }} -e SUITE=${{ matrix.suite }} \
             registry.fedoraproject.org/fedora:45 bash ci.sh
+      - name: Make logs readable
+        if: always()
+        run: sudo chmod -R a+rX testbench/run || true    # written by root inside the container
       - name: Logs
         if: always()
         uses: actions/upload-artifact@v4
