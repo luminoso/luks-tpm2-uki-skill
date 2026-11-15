@@ -1,19 +1,22 @@
 # /etc/kernel/esp-signing.conf, read by resign-esp. Pick the block for your boot chain.
 
+# Every FILES entry with a COPY source is restored from the package when it is not yours.
+# Entries without a source (Debian-signed MokManager/fallback in the Microsoft-keys chain) are re-signed in place.
+
 # No shim (firmware starts systemd-boot directly), own keys in firmware db:
 KEY=/var/lib/sbctl/keys/db/db.key
 CERT=/var/lib/sbctl/keys/db/db.pem
-COPY=""
+COPY="/usr/lib/systemd/boot/efi/systemd-bootx64.efi:/boot/efi/EFI/systemd/systemd-bootx64.efi /usr/lib/systemd/boot/efi/systemd-bootx64.efi:/boot/efi/EFI/BOOT/BOOTX64.EFI"
 FILES="/boot/efi/EFI/systemd/systemd-bootx64.efi /boot/efi/EFI/BOOT/BOOTX64.EFI"
 
 # Own keys + shim-unsigned (shim in its own ESP directory, copied from the package on update):
 # KEY=/var/lib/sbctl/keys/db/db.key
 # CERT=/var/lib/sbctl/keys/db/db.pem
-# COPY="/usr/lib/shim/shimx64.efi:/boot/efi/EFI/shim/shimx64.efi /usr/lib/shim/mmx64.efi:/boot/efi/EFI/shim/mmx64.efi"
+# COPY="/usr/lib/shim/shimx64.efi:/boot/efi/EFI/shim/shimx64.efi /usr/lib/shim/mmx64.efi:/boot/efi/EFI/shim/mmx64.efi /usr/lib/systemd/boot/efi/systemd-bootx64.efi:/boot/efi/EFI/systemd/systemd-bootx64.efi /usr/lib/systemd/boot/efi/systemd-bootx64.efi:/boot/efi/EFI/BOOT/BOOTX64.EFI"
 # FILES="/boot/efi/EFI/shim/shimx64.efi /boot/efi/EFI/shim/mmx64.efi /boot/efi/EFI/systemd/systemd-bootx64.efi /boot/efi/EFI/BOOT/BOOTX64.EFI"
 
 # Microsoft keys + shim-signed (shim keeps Microsoft's signature; your key is a MOK):
 # KEY=/etc/kernel/secure-boot-private-key.pem
 # CERT=/etc/kernel/secure-boot-certificate.pem
-# COPY=""
+# COPY="/usr/lib/systemd/boot/efi/systemd-bootx64.efi:/boot/efi/EFI/systemd/systemd-bootx64.efi"
 # FILES="/boot/efi/EFI/systemd/systemd-bootx64.efi /boot/efi/EFI/debian/mmx64.efi /boot/efi/EFI/debian/fbx64.efi /boot/efi/EFI/BOOT/mmx64.efi /boot/efi/EFI/BOOT/fbx64.efi"

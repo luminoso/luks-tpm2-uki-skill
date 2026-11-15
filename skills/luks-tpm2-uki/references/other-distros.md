@@ -31,7 +31,9 @@ These are systemd components and behave the same wherever systemd 255 or newer s
 
 - Debian 13 base, Proxmox kernel (Ubuntu-derived), Proxmox's own `systemd-boot` build.
 - The kernel loaded a DKMS module signed by a certificate that was only in firmware `db`, with lockdown on and no shim. On Proxmox, DKMS works with the no-shim chain if DKMS signs with the `db` key.
-- Kernel packages recommend `grub-pc` and depend on `initramfs-tools | linux-initramfs-tool`. dracut satisfies the dependency; GRUB and `initramfs-tools` need pins.
+- Kernel packages recommend `grub-pc` and depend on `initramfs-tools | linux-initramfs-tool`. dracut satisfies the dependency; pin `initramfs-tools` out.
+- Do not remove GRUB: `zz-proxmox-boot` fails every kernel install and removal when booted in EFI mode without `grub-efi-amd64`. Keep it installed, marked manual, with `grub2/update_nvram false` and `grub2/force_efi_extra_removable false`. Without `/boot/grub/x86_64-efi/core.efi` its package scripts never run `grub-install`.
+- `shim-signed` may be left in state `ic` (install requested, only config files) after its pre-install script refused under your own keys. Pin it to -1; do not purge it if `EFI/proxmox` or `EFI/debian` exists on the ESP, because its postrm then runs `grub-install`.
 - `proxmox-boot-tool`'s hook (`zz-proxmox-boot`) does nothing unless `/etc/kernel/proxmox-boot-uuids` exists. Check before adding ESPs to it, since it manages its own copies.
 
 ## When the target is not Debian

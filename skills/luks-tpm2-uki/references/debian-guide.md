@@ -464,6 +464,8 @@ apt purge --allow-remove-essential grub-efi-amd64 grub-efi-amd64-signed grub-efi
 
 Debian marks the signed GRUB package as protected, hence `--allow-remove-essential`. Without the flag, apt asks you to type a confirmation phrase.
 
+On Proxmox VE, do not remove GRUB. Proxmox's kernel hook (`zz-proxmox-boot`) exits with an error when the machine booted in EFI mode and `grub-efi-amd64` is not installed, so every kernel install or removal fails. Keep `grub-efi-amd64` installed, mark it manual (`apt-mark manual grub-efi-amd64`), and stop it from touching the firmware boot entries and the fallback path: `printf 'grub-efi-amd64 grub2/update_nvram boolean false\ngrub-efi-amd64 grub2/force_efi_extra_removable boolean false\n' | debconf-set-selections`. Its package scripts run `grub-install` only if `/boot/grub/x86_64-efi/core.efi` exists. Pin only `initramfs-tools`, not GRUB.
+
 Install shim. The two options use different packages. Run only the block for your option.
 
 Option 1, the same shim unsigned (you sign it yourself):
@@ -559,12 +561,12 @@ Which key signs what, `/etc/kernel/esp-signing.conf`:
 # Option 1:
 KEY=/var/lib/sbctl/keys/db/db.key
 CERT=/var/lib/sbctl/keys/db/db.pem
-COPY="/usr/lib/shim/shimx64.efi:/boot/efi/EFI/shim/shimx64.efi /usr/lib/shim/mmx64.efi:/boot/efi/EFI/shim/mmx64.efi"
+COPY="/usr/lib/shim/shimx64.efi:/boot/efi/EFI/shim/shimx64.efi /usr/lib/shim/mmx64.efi:/boot/efi/EFI/shim/mmx64.efi /usr/lib/systemd/boot/efi/systemd-bootx64.efi:/boot/efi/EFI/systemd/systemd-bootx64.efi /usr/lib/systemd/boot/efi/systemd-bootx64.efi:/boot/efi/EFI/BOOT/BOOTX64.EFI"
 FILES="/boot/efi/EFI/shim/shimx64.efi /boot/efi/EFI/shim/mmx64.efi /boot/efi/EFI/systemd/systemd-bootx64.efi /boot/efi/EFI/BOOT/BOOTX64.EFI"
 # Option 2 instead (shim keeps Microsoft's signature, so it is not in the list):
 # KEY=/etc/kernel/secure-boot-private-key.pem
 # CERT=/etc/kernel/secure-boot-certificate.pem
-# COPY=""
+# COPY="/usr/lib/systemd/boot/efi/systemd-bootx64.efi:/boot/efi/EFI/systemd/systemd-bootx64.efi"
 # FILES="/boot/efi/EFI/systemd/systemd-bootx64.efi /boot/efi/EFI/debian/mmx64.efi /boot/efi/EFI/debian/fbx64.efi /boot/efi/EFI/BOOT/mmx64.efi /boot/efi/EFI/BOOT/fbx64.efi"
 ```
 
@@ -572,16 +574,18 @@ The script, `/usr/local/sbin/resign-esp` (`chmod 0755`):
 
 ```sh
 #!/bin/sh
-# Copy updated shim files to the ESP (COPY), then leave every boot file in FILES with exactly one
-# signature: yours. Runs after every apt operation.
+# Copy boot files from their package (COPY) when the package changed or the ESP copy is not yours,
+# then leave every boot file in FILES with exactly one signature: yours. Runs after every apt operation.
 set -eu
 . /etc/kernel/esp-signing.conf
 mkdir -p /var/lib/resign-esp
+ours() { [ "$(sbverify --list "$1" 2>/dev/null | grep -c '^signature [0-9]')" = 1 ] && sbverify --cert "$CERT" "$1" >/dev/null 2>&1; }
 for pair in $COPY; do
   src=${pair%%:*} dst=${pair#*:} stamp=/var/lib/resign-esp/$(basename "${pair#*:}").sha256
   sum=$(sha256sum < "$src")
-  if [ ! -f "$dst" ] || [ "$(cat "$stamp" 2>/dev/null)" != "$sum" ]; then
-    cp "$src" "$dst" && echo "$sum" > "$stamp" && echo "resign-esp: copied $src"
+  if [ ! -f "$dst" ] || [ "$(cat "$stamp" 2>/dev/null)" != "$sum" ] || ! ours "$dst"; then
+    mkdir -p "$(dirname "$dst")"
+    cp "$src" "$dst" && echo "$sum" > "$stamp" && echo "resign-esp: copied $src to $dst"
   fi
 done
 for f in $FILES; do
@@ -606,7 +610,7 @@ Then run it once by hand:
 /usr/local/sbin/resign-esp
 ```
 
-Package updates of shim or systemd-boot change the boot files: option 2's packages put Debian-signed copies back on the ESP, and in option 1 a new shim lands in `/usr/lib/shim`. In the test VM, reinstalling those packages did exactly that, and the hook copied and re-signed every file before the next boot.
+The script restores a file from its package whenever the ESP copy is not signed by you, rather than signing whatever is there. If something else writes to those paths (a `grub-install`, another tool), its file is replaced, never signed with your key. Package updates of shim or systemd-boot change the boot files: option 2's packages put Debian-signed copies back on the ESP, and in option 1 a new shim lands in `/usr/lib/shim`. In the test VM, reinstalling those packages did exactly that, and the hook copied and re-signed every file before the next boot.
 
 Option 1 only, the boot entry: the firmware starts your shim, and shim starts systemd-boot. This is the same form Debian's own script uses for option 2:
 

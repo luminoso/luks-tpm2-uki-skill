@@ -42,12 +42,12 @@ if [ $OPTION = 1 ]; then
   bootctl install --no-variables          # restore EFI/BOOT/BOOTX64.EFI (systemd-boot) as removable fallback
   install -d "$ESP/EFI/shim"
   KEY=/var/lib/sbctl/keys/db/db.key CERT=/var/lib/sbctl/keys/db/db.pem
-  COPY="/usr/lib/shim/shimx64.efi:$ESP/EFI/shim/shimx64.efi /usr/lib/shim/mmx64.efi:$ESP/EFI/shim/mmx64.efi"
+  COPY="/usr/lib/shim/shimx64.efi:$ESP/EFI/shim/shimx64.efi /usr/lib/shim/mmx64.efi:$ESP/EFI/shim/mmx64.efi /usr/lib/systemd/boot/efi/systemd-bootx64.efi:$ESP/EFI/systemd/systemd-bootx64.efi /usr/lib/systemd/boot/efi/systemd-bootx64.efi:$ESP/EFI/BOOT/BOOTX64.EFI"
   FILES="$ESP/EFI/shim/shimx64.efi $ESP/EFI/shim/mmx64.efi $ESP/EFI/systemd/systemd-bootx64.efi $ESP/EFI/BOOT/BOOTX64.EFI"
 else
   dpkg-reconfigure systemd-boot          # with signed GRUB gone, this puts shim-signed in front
   KEY=/etc/kernel/secure-boot-private-key.pem CERT=/etc/kernel/secure-boot-certificate.pem
-  COPY=""
+  COPY="/usr/lib/systemd/boot/efi/systemd-bootx64.efi:$ESP/EFI/systemd/systemd-bootx64.efi"
   FILES="$ESP/EFI/systemd/systemd-bootx64.efi $ESP/EFI/debian/mmx64.efi $ESP/EFI/debian/fbx64.efi $ESP/EFI/BOOT/mmx64.efi $ESP/EFI/BOOT/fbx64.efi"
 fi
 
@@ -70,16 +70,18 @@ FILES="$FILES"
 C
 cat > /usr/local/sbin/resign-esp <<'C'
 #!/bin/sh
-# Copy updated shim files to the ESP (COPY), then leave every boot file in FILES with exactly one
-# signature: yours. Runs after every apt operation.
+# Copy boot files from their package (COPY) when the package changed or the ESP copy is not yours,
+# then leave every boot file in FILES with exactly one signature: yours. Runs after every apt operation.
 set -eu
 . /etc/kernel/esp-signing.conf
 mkdir -p /var/lib/resign-esp
+ours() { [ "$(sbverify --list "$1" 2>/dev/null | grep -c '^signature [0-9]')" = 1 ] && sbverify --cert "$CERT" "$1" >/dev/null 2>&1; }
 for pair in $COPY; do
   src=${pair%%:*} dst=${pair#*:} stamp=/var/lib/resign-esp/$(basename "${pair#*:}").sha256
   sum=$(sha256sum < "$src")
-  if [ ! -f "$dst" ] || [ "$(cat "$stamp" 2>/dev/null)" != "$sum" ]; then
-    cp "$src" "$dst" && echo "$sum" > "$stamp" && echo "resign-esp: copied $src"
+  if [ ! -f "$dst" ] || [ "$(cat "$stamp" 2>/dev/null)" != "$sum" ] || ! ours "$dst"; then
+    mkdir -p "$(dirname "$dst")"
+    cp "$src" "$dst" && echo "$sum" > "$stamp" && echo "resign-esp: copied $src to $dst"
   fi
 done
 for f in $FILES; do

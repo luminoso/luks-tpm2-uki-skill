@@ -61,6 +61,7 @@ Everything here was tested in a QEMU/OVMF/swtpm VM and on a real Proxmox host. T
 
 - `apt install sbctl`: not packaged in Debian. Build the signed upstream release, or use `efitools` + `sbsign`.
 - `systemd-pcrlock` is in `/usr/lib/systemd/`, not in `$PATH`.
+- On Proxmox, do not remove GRUB: its kernel hook fails without `grub-efi-amd64`. Keep it installed and unable to write NVRAM or the fallback path.
 - `kernel-install add-all` finds no kernels on Debian. Loop over `/boot/vmlinuz-*`.
 - fwupd/LVFS `dbx` updates cannot apply under your own KEK.
 - Creating a firmware boot entry (`efibootmgr --create`) changes PCR 1. If PCR 1 is locked, plan the re-lock.
