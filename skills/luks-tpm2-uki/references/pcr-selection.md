@@ -106,9 +106,21 @@ $P make-policy --pcr=$PCRS --recovery-pin=query
 
 No `systemd-cryptenroll` needed: the LUKS token points to the same NV index. `Failed to add OR policy to TPM: tpm:parameter(1):value is out of range` (TPM_RC 0x1c4) means the current PCRs match none of the predicted values: add `--recovery-pin=query`.
 
+`--recovery-pin=query` makes `make-policy` use the PIN every time. While the machine still matches the policy in force, leave it out: the update is authorized by the current PCRs and the PIN does not change. With the option and an empty or wrong PIN, the VM failed with `Failed to write to NV index` (TPM_RC 0x99d) even on a matching boot. `scripts/pcrlock-update close` tries without the PIN first and asks only if that fails.
+
 ## Planned changes without a passphrase prompt
 
-When you change something yourself (for example writing a new `db`), keep the old state as a second allowed value before the change, so both match:
+Firmware updates and BIOS settings cannot be recorded before they happen: the new values only exist in the event log of the first boot after the change. Narrow the policy for that one boot instead (`scripts/pcrlock-update`):
+
+```bash
+pcrlock-update open 0,1,2,3      # PCR 7 always stays locked
+# flash the firmware or change the setting, reboot: opens automatically
+pcrlock-update close             # re-record all components, lock the full list again
+```
+
+Tested in the VM by switching to a firmware build from a different edk2 release: PCRs 0, 1 and 2 changed (the firmware's handoff tables are measured into PCR 1), so `open 0,2` still prompted and `open 0,1,2,3` did not. No PIN was asked at either step.
+
+When you change a Secure Boot variable yourself (for example writing a new `db`), you can record it ahead instead, and keep the old state as a second allowed value before the change, so both match:
 
 ```bash
 D=/var/lib/pcrlock.d/240-secureboot-policy.pcrlock.d

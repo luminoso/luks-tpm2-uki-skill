@@ -1,13 +1,13 @@
 # Debian 13 TPM2 disk decryption with a signed UKI
 
-Automatic LUKS2 decryption from the TPM, no PIN, on Debian 13 (trixie). The chain is: Secure Boot, Debian's shim restricted to your own keys, systemd-boot, a Unified Kernel Image built by `kernel-install` + `ukify` + dracut, and a TPM2 policy made of `systemd-pcrlock` (firmware and Secure Boot state) plus a signed PCR 11 (kernel, initrd, command line).
+Automatic LUKS2 decryption from the TPM, no PIN, on Debian 13 (trixie). The chain is: Secure Boot with keys you control, systemd-boot, a Unified Kernel Image built by `kernel-install` + `ukify` + dracut, and a TPM2 policy made of `systemd-pcrlock` (firmware and Secure Boot state) plus a signed PCR 11 (kernel, initrd, command line).
 
 There are two ways to set up Secure Boot. Section 2 explains how to choose:
 
-- Option 1 (default): only your own keys in the firmware. Microsoft is removed.
-- Option 2: the factory Microsoft keys stay. Your key is added to shim as a MOK.
+- Option 1 (default): only your own keys in the firmware, and the firmware starts systemd-boot directly. No shim: nothing from Microsoft or Debian runs before your UKI. DKMS modules (NVIDIA, VirtualBox, ZFS) are signed with your `db` key, which Debian's kernel accepts.
+- Option 2: the factory Microsoft keys stay. Debian's shim starts systemd-boot, and your key and the DKMS key are added to shim as MOKs. shim is told to distrust Debian's own signing certificate, so that only code you signed runs (section 2 explains why that matters).
 
-Both keep DKMS modules (NVIDIA, VirtualBox, ZFS) working, and in both, shim is told to distrust Debian's own signing certificate so that only code you signed runs (section 2 explains why that matters). Steps that differ are marked "Option 1" or "Option 2". Everything else applies to both.
+Steps that differ are marked "Option 1" or "Option 2". Everything else applies to both.
 
 Kernel updates keep working without resealing. Nothing has to be "predicted" for a new kernel: each UKI carries a signature over the PCR 11 value it will produce, and the TPM accepts any value signed by your key.
 
@@ -56,26 +56,27 @@ The initrd (initial RAM disk) is a small filesystem the kernel starts before you
 
 A UKI (Unified Kernel Image) is one EFI program that bundles the kernel, the initrd, the kernel command line and some metadata, signed as one file.
 
-DKMS builds kernel modules that Debian does not ship ready-made, such as the proprietary NVIDIA driver, VirtualBox or ZFS, and signs them with its own key in `/var/lib/dkms/`. With Secure Boot on, the kernel loads such a module only if that key is a MOK.
+DKMS builds kernel modules that Debian does not ship ready-made, such as the proprietary NVIDIA driver, VirtualBox or ZFS, and signs them with a key. With Secure Boot on, Debian's kernel loads such a module only if that key is in firmware `db` (option 1) or is a MOK (option 2).
 
 ### Choosing an option
 
-| | Option 1 (default): your own keys | Option 2: Microsoft keys kept |
+| | Option 1 (default): your own keys, no shim | Option 2: Microsoft keys kept |
 |---|---|---|
+| Boot chain | firmware, systemd-boot, UKI | firmware, Debian's shim, systemd-boot, UKI |
 | Firmware `db` trusts | only your key, plus option ROM hashes of your hardware | Microsoft's Windows and third-party certificates (factory state) |
-| shim then trusts | your `db` key and your MOKs (Debian's certificate denied) | your MOKs (Debian's certificate denied) |
-| What the firmware will start | only your copy of shim | your shim, plus anything Microsoft signed: other distributions, Windows, old boot loaders with known holes until they are revoked |
+| What the firmware will start | only files you signed | your shim, plus anything Microsoft signed: other distributions, Windows, old boot loaders with known holes until they are revoked |
+| Debian's signing certificate | never trusted | denied in shim (MokListX) |
 | Firmware Setup Mode | needed once | not needed |
 | sbctl (built from source) | needed | not needed |
 | Option ROM risk (GPU, add-in cards) | hashes enrolled, a swapped card may not start | none |
 | Windows dual boot | no (unless you enroll Microsoft's keys too) | yes |
-| DKMS modules | yes, through MOK | yes, through MOK |
+| DKMS modules | yes, signed with your `db` key | yes, through MOK |
+| Confirmations at the console (MokManager) | none | 2 |
 
-Choose option 1 when you want the machine to run as little foreign code as possible and you control the hardware. Choose option 2 when the firmware cannot enter Setup Mode, when you dual boot Windows, when you cannot risk a GPU that will not start, or when you want fewer moving parts.
+Choose option 1 when you want the machine to run as little foreign code as possible and you control the hardware: it also has the fewest parts. Choose option 2 when the firmware cannot enter Setup Mode, when you dual boot Windows, or when you cannot risk a GPU that will not start.
 
-For the disk key the two are close, with one difference. In option 2 the firmware still starts anything Microsoft signed. Another distribution's shim leads to a different PCR 7, so the TPM refuses (by design, not tested). But an old Microsoft-signed boot program with an exploitable bug would let an attacker run code before your chain and fake the remaining measurements. That is the class of attack BlackLotus used (see below). Option 1 does not start such programs at all.
+For the disk key the options are close, with one difference. In option 2 the firmware still starts anything Microsoft signed. Another distribution's shim leads to a different PCR 7, so the TPM refuses (by design, not tested). But an old Microsoft-signed boot program with an exploitable bug would let an attacker run code before your chain and fake the remaining measurements. That is the class of attack BlackLotus used (see below). Option 1 does not start such programs at all.
 
-A stricter variant removes shim entirely: firmware, then systemd-boot signed by you, then your UKI. It passed the same tests, but DKMS modules cannot load without shim. Its steps are in `testbench/steps/04-uki-bootloader.sh` and are not covered here.
 
 ### Why a UKI instead of a separate kernel and initrd
 
@@ -103,11 +104,11 @@ What you give up: GRUB's extras, such as booting btrfs snapshots from the menu. 
 
 Most PCs ship with two Microsoft certificates in `db`: one for Windows, and the "Microsoft UEFI CA" for third parties. The second signs the shim of nearly every Linux distribution, plus various tools and the option ROMs of most add-in cards. Anything signed by either one boots on your machine. That includes old versions with known holes until they are added to `dbx`. The BlackLotus bootkit (2023) used CVE-2022-21894, a flaw in an old but still validly signed Windows boot manager, to switch Secure Boot off on fully patched machines.
 
-In option 1, `db` holds only your certificate plus the option ROM hashes of your hardware. The firmware starts your copy of shim, which you signed, and nothing from Microsoft.
+In option 1, `db` holds only your certificate plus the option ROM hashes of your hardware. The firmware starts systemd-boot, which you signed, and nothing from Microsoft.
 
 In option 2, Microsoft's certificates stay in `db`. MOK is how your own UKI signing key gets in: shim trusts it because you enrolled it.
 
-In both options, MOK is also what lets DKMS modules load: the DKMS key becomes a MOK, and the kernel accepts modules signed with it.
+In option 2, MOK is also what lets DKMS modules load: the DKMS key becomes a MOK, and the kernel accepts modules signed with it. In option 1, DKMS signs with your `db` key instead.
 
 What option 1 costs you:
 
@@ -115,7 +116,15 @@ What option 1 costs you:
 - Add-in cards need their option ROM hashes enrolled (section 4).
 - The keys in `/var/lib/sbctl/keys` are now the root of trust for your machine. Anyone who copies them can sign code your firmware will run, so back them up offline (section 17) and protect root on this machine.
 
-### Why shim must distrust Debian's certificate
+### Why no shim in option 1
+
+shim exists so that distributions can boot on PCs that trust only Microsoft, and so that owners can add keys (MOK) without touching the firmware. With your own keys in `db`, the firmware checks systemd-boot itself, and you can add keys to `db` whenever you like. Leaving shim out removes Debian's built-in certificate from the boot path (the attack in the next subsection never starts), MokManager, two files to re-sign after every shim update, and shim's events in PCR 7.
+
+Kernel modules need nothing extra. Debian's kernel accepts modules signed with a key that is in firmware `db`. Tested in the VM on Debian's 6.12 and 7.2 kernels with Secure Boot on and kernel lockdown active: a module signed with the `db` key loaded, while the same module unsigned, or signed with a key enrolled nowhere, was refused with `Key was rejected by service`. A real DKMS module signed that way was rebuilt and loaded after a kernel upgrade. The Proxmox VE 9 kernel behaves the same. Upstream Linux keeps `db` keys for kexec only; on a kernel built that way, modules would need a MOK, and so shim. `testbench/tests/dkms-insmod.sh` checks a kernel in a minute.
+
+Own keys plus shim also works: the test bench still covers it (`SHIM=1`, `steps/04-uki-bootloader-shim.sh`, with `shim-unsigned` signed by you and Debian's certificate denied). It only adds parts on Debian.
+
+### Option 2: why shim must distrust Debian's certificate
 
 shim has Debian's certificate built in, so out of the box it runs anything Debian ever signed: Debian's GRUB, every Debian kernel, MokManager. A Debian kernel accepts any initrd, signed or not. That opens a way around the TPM:
 
@@ -125,7 +134,9 @@ shim has Debian's certificate built in, so out of the box it runs anything Debia
 4. PCRs can be extended from software. The initrd adds the missing PCR 7 entry, and the PCR 11 measurements of your UKI, which anyone can compute from the UKI file on the ESP. The `.pcrsig` signature is in that file too.
 5. The TPM now sees exactly the values it expects and releases the disk key.
 
-In the test VM this worked on both options until Debian's certificate was denied (`testbench/tests/n5-*`). With Debian's certificate in shim's deny list (MokListX), shim refuses the Debian kernel with "Security Policy Violation", and the refusal itself adds an entry to PCR 7, so the TPM stays shut for that boot as well.
+In the test VM this worked with shim, with your own keys and with Microsoft's, until Debian's certificate was denied (`testbench/tests/n5-*`). With Debian's certificate in shim's deny list (MokListX), shim refuses the Debian kernel with "Security Policy Violation", and the refusal itself adds an entry to PCR 7, so the TPM stays shut for that boot as well.
+
+Option 1 never trusts Debian's certificate: in the test VM the firmware refused the same Debian kernel outright.
 
 Denying Debian means shim also refuses Debian's signed systemd-boot and MokManager. Section 10 re-signs both with your key, and an apt hook repeats that after every package update. The Debian kernel inside your UKI is not affected: shim checks the UKI as a whole, and the UKI carries your signature.
 
@@ -154,12 +165,12 @@ Keep the passphrase no matter what. Every TPM refusal (firmware update, BIOS cha
 UEFI firmware, Secure Boot
   option 1: db = your key only; option 2: db = Microsoft's keys
   measures firmware code and config into PCR 0-3, Secure Boot state into PCR 7
-  verifies shim (option 1: your signature; option 2: Microsoft's)
+  option 1: verifies systemd-boot and UKIs against your db key; option 2: verifies shim
         |
-shim (Debian's: option 1 shim-unsigned in ESP/EFI/shim/, option 2 shim-signed in ESP/EFI/debian/)
+shim, option 2 only (shim-signed in ESP/EFI/debian/)
   Debian's certificate denied via MokListX
   measures MOK lists into PCR 14, its SBAT level and approving certificates into PCR 7
-  verifies systemd-boot and UKIs: only your db key (option 1) or your MOK (option 2)
+  verifies systemd-boot and UKIs against your MOK
         |
 systemd-boot (re-signed by you)
   measures loader.conf into PCR 5, starts UKIs from ESP/EFI/Linux/
@@ -175,7 +186,7 @@ dracut initrd
     - PolicyAuthorize: PCR 11 matches a value signed by your PCR key, for the enter-initrd phase only
   after switch-root PCR 11 changes again, so the running system can no longer get the key
         |
-kernel: loads Debian's modules and DKMS modules signed with a MOK
+kernel: loads Debian's modules, and DKMS modules signed with your db key (option 1) or a MOK (option 2)
 ```
 
 What the PCRs hold on this setup (measured in the test VM):
@@ -184,14 +195,14 @@ What the PCRs hold on this setup (measured in the test VM):
 |---|---|---|
 | 0, 2 | Firmware code, option ROMs | pcrlock (optional) |
 | 1, 3 | Firmware settings, boot order | pcrlock (optional, fragile) |
-| 4 | Hashes of shim, systemd-boot and the UKI | not locked: changes with every update |
+| 4 | Hashes of shim (option 2), systemd-boot and the UKI | not locked: changes with every update |
 | 5 | systemd-boot `loader.conf`, GPT | not locked: pcrlock drops it |
 | 7 | Secure Boot on/off, PK/KEK/db/dbx, shim's SBAT level, which certificate approved each step, refusals by MokListX | pcrlock (required) |
 | 8 | Always zero with systemd-boot | nothing to lock |
 | 11 | UKI sections + boot phase | signed policy (always) |
 | 12 | pcrlock's own credential from the ESP | must not be locked |
 | 13 | sysexts (zero here) | pcrlock (optional) |
-| 14 | shim's MOK lists | not locked: pcrlock drops it |
+| 14 | shim's MOK lists (option 2; empty in option 1) | not locked: pcrlock drops it with shim |
 
 ### Choosing PCRs
 
@@ -222,23 +233,25 @@ Every path in this guide, and whether it is a standard location:
 | `/var/lib/sbctl/keys/{PK,KEK,db}/` | Option 1: Secure Boot keys and certificates | sbctl's default |
 | `/usr/local/bin/sbctl` | Option 1: sbctl built from source | FHS: locally built software |
 | `/etc/kernel/secure-boot-private-key.pem`, `/etc/kernel/secure-boot-certificate.pem` (+ `.der`) | Option 2: your signing key, enrolled as a MOK | systemd: example paths in Debian's `/usr/lib/kernel/uki.conf` |
-| `/var/lib/dkms/mok.key`, `/var/lib/dkms/mok.pub` | DKMS module signing key, enrolled as a MOK | Debian dkms default |
+| `/var/lib/dkms/mok.key`, `/var/lib/dkms/mok.pub` | Option 2: DKMS module signing key, enrolled as a MOK | Debian dkms default |
+| `/etc/dkms/framework.conf.d/db-key.conf`, `/var/lib/sbctl/keys/db/db.der` | Option 1: DKMS signs with your `db` key | dkms drop-in directory |
 | `/etc/systemd/tpm2-pcr-private-key.pem`, `/etc/systemd/tpm2-pcr-public-key.pem` | Key that signs PCR 11 values, and its public half | systemd: example paths in `/usr/lib/kernel/uki.conf`; `systemd-cryptenroll` uses the public one by default |
 | `/etc/kernel/uki.conf` | ukify settings used by kernel-install | systemd (replaces `/usr/lib/kernel/uki.conf` as a whole) |
 | `/etc/kernel/install.conf`, `/etc/kernel/cmdline` | UKI layout, embedded command line | systemd kernel-install |
 | `/etc/dracut.conf.d/50-tpm2-uki.conf` | dracut options | dracut drop-in directory |
 | `/etc/crypttab` | LUKS volumes | standard |
 | `/var/lib/pcrlock.d/`, `/var/lib/systemd/pcrlock.json` | Recorded components, current policy | systemd-pcrlock defaults |
-| `ESP/EFI/shim/shimx64.efi`, `mmx64.efi` | Option 1: shim and MokManager, from `shim-unsigned`, signed by you | this guide |
 | `ESP/EFI/debian/shimx64.efi`, `mmx64.efi`, `fbx64.efi`, `ESP/EFI/BOOT/BOOTX64.EFI` | Option 2: shim, MokManager, fallback loader, removable-media copy of shim | Debian's systemd-boot package |
-| `ESP/EFI/systemd/systemd-bootx64.efi` | systemd-boot | systemd-boot |
+| `ESP/EFI/systemd/systemd-bootx64.efi`, `ESP/EFI/BOOT/BOOTX64.EFI` | systemd-boot, and its removable-media copy (option 1) | systemd-boot |
 | `ESP/loader/credentials/pcrlock.<machine-id>.cred` | Copy of the policy for the initrd | written by systemd-pcrlock |
 | `ESP/EFI/Linux/<machine-id>-<version>.efi` | Signed UKIs | Boot Loader Specification, Type #2 |
 | `ESP/loader/loader.conf` | systemd-boot menu settings | systemd-boot |
 | `/etc/kernel/esp-signing.conf`, `/usr/local/sbin/resign-esp`, `/etc/apt/apt.conf.d/99-resign-esp`, `/var/lib/resign-esp/` | Which key re-signs which boot files, the script, its apt hook, hashes of the last copied shim files | this guide (FHS: local scripts) |
-| `/etc/kernel/debian-secure-boot-ca.der` | Debian's certificate, as denied in MokListX | this guide only |
+| `/etc/kernel/debian-secure-boot-ca.der` | Option 2: Debian's certificate, as denied in MokListX | this guide only |
 | `/etc/apt/preferences.d/no-grub` | Package pins | apt drop-in directory |
 | `/etc/kernel/pcrlock-pcrs` | Your chosen pcrlock PCR list | this guide only |
+| `/etc/kernel/tries` | Boot attempts per new UKI | systemd kernel-install |
+| `/usr/local/sbin/check-next-boot`, `pcrlock-update`, `tpm-unlock-check` + `/etc/systemd/system/tpm-unlock-check.service` | Pre-reboot check, planned-change helper, unlock alert | this guide (from `skills/luks-tpm2-uki/scripts/`) |
 
 Putting keys at the conventional paths does not turn signing on by itself. All settings in Debian's `/usr/lib/kernel/uki.conf` are commented out. In the test VM, with keys copied to `/etc/kernel/secure-boot-private-key.pem`, `/etc/kernel/secure-boot-certificate.pem` and the two `/etc/systemd/tpm2-pcr-*` files and no `/etc/kernel/uki.conf`, kernel-install wrote an unsigned UKI with no PCR signature, which Secure Boot refuses. `/etc/kernel/uki.conf` is what makes the signing happen.
 
@@ -258,7 +271,7 @@ Putting keys at the conventional paths does not turn signing on by itself. All s
    cryptsetup luksAddKey /dev/nvme0n1p2      # only if you have no passphrase slot
    ```
 
-3. You need a keyboard and screen on the machine for a few reboots. Enrolling a MOK, or denying a certificate, is confirmed in MokManager, a blue text screen shown by shim before anything else loads. On a headless server, use the remote console (IPMI, iDRAC, iLO) for those reboots.
+3. You need a keyboard and screen on the machine for a few reboots: the firmware setup (option 1), or MokManager (option 2), a blue text screen shown by shim before anything else loads, where you confirm a MOK or a denied certificate. On a headless server, use the remote console (IPMI, iDRAC, iLO) for those reboots.
 
 4. Option 1: check that your firmware can clear the Secure Boot keys or enter Setup Mode, and can turn Secure Boot off again. You need the first at the end of section 10 and the second if something goes wrong.
 
@@ -353,10 +366,13 @@ mokutil --list-enrolled | grep 'Subject: CN'     # must list "UKI signing key" a
 
 ```bash
 apt update
-apt install systemd-boot systemd-ukify systemd-cryptsetup dracut tpm2-tools sbsigntool efibootmgr mokutil dkms
+apt install systemd-boot systemd-ukify systemd-cryptsetup dracut tpm2-tools sbsigntool efibootmgr mokutil
+apt install dkms          # only if you build kernel modules (NVIDIA, ZFS, VirtualBox)
 ```
 
-Installing dracut removes `initramfs-tools`. That is expected.
+On Debian testing (forky, systemd 262), `systemd-pcrlock` and the boot-phase units moved to a new package: add `systemd-tpm` to the list.
+
+Installing dracut removes `initramfs-tools`. That is expected. `mokutil` is only needed for option 2, but `mokutil --sb-state` is a handy check in both.
 
 Installing `systemd-boot` immediately runs `bootctl install`, adds a "Linux Boot Manager" boot entry at the front, and writes a Type #1 entry for each installed kernel. Do not reboot between here and the end of section 10: the firmware refuses the new "Linux Boot Manager" entry.
 
@@ -397,6 +413,8 @@ compress="zstd"
 add_dracutmodules+=" systemd-cryptsetup systemd-pcrphase tpm2-tss btrfs "
 omit_dracutmodules+=" network cifs nfs iscsi nbd "
 ```
+
+On Debian testing, dracut 112 calls this module `systemd-pcrextend`, and `systemd-pcrphase` stops the build with "Module 'systemd-pcrphase' cannot be found". `ls /usr/lib/dracut/modules.d/ | grep pcr` shows which name your dracut has.
 
 `systemd-pcrphase` is required: it measures the `enter-initrd` phase into PCR 11, and the PCR signature is made for that value. Without it the signed policy never matches. `hostonly_cmdline="no"` keeps dracut from baking a second command line into the initrd, because the UKI already carries one.
 
@@ -441,7 +459,7 @@ ukify signs the UKI with that key (through `sbsign`) and adds a `.pcrsig` sectio
 
 There is no `Linux=`, `Initrd=` or `Cmdline=` here: `kernel-install` passes the kernel, the dracut initrd and `/etc/kernel/cmdline` for each kernel version.
 
-## 10. Switch to shim, systemd-boot and signed UKIs
+## 10. Switch to systemd-boot and signed UKIs
 
 Why systemd-boot instead of GRUB: section 2.
 
@@ -466,13 +484,12 @@ Debian marks the signed GRUB package as protected, hence `--allow-remove-essenti
 
 On Proxmox VE, do not remove GRUB. Proxmox's kernel hook (`zz-proxmox-boot`) exits with an error when the machine booted in EFI mode and `grub-efi-amd64` is not installed, so every kernel install or removal fails. Keep `grub-efi-amd64` installed, mark it manual (`apt-mark manual grub-efi-amd64`), and stop it from touching the firmware boot entries and the fallback path: `printf 'grub-efi-amd64 grub2/update_nvram boolean false\ngrub-efi-amd64 grub2/force_efi_extra_removable boolean false\n' | debconf-set-selections`. Its package scripts run `grub-install` only if `/boot/grub/x86_64-efi/core.efi` exists. Pin only `initramfs-tools`, not GRUB.
 
-Install shim. The two options use different packages. Run only the block for your option.
+Remove or install shim. Run only the block for your option.
 
-Option 1, the same shim unsigned (you sign it yourself):
+Option 1, no shim at all:
 
 ```bash
-apt purge shim-signed shim-signed-common shim-helpers-amd64-signed systemd-boot-efi-amd64-signed
-apt install shim-unsigned mokutil
+apt purge shim-signed shim-signed-common shim-helpers-amd64-signed shim-unsigned systemd-boot-efi-amd64-signed
 apt autoremove --purge
 ```
 
@@ -482,8 +499,6 @@ Option 2, shim signed by Microsoft, which your firmware trusts:
 apt install shim-signed systemd-boot-efi-amd64-signed mokutil
 apt autoremove --purge
 ```
-
-Option 1 cannot use `shim-signed`. Its pre-install script checks whether the firmware's `db` trusts Microsoft's signature on shim and refuses otherwise. In the test VM, with only your key in `db`, every reinstall or upgrade of `shim-signed` failed with "FATAL ERROR - your system will not currently boot with this signed shim installed" and left dpkg half-configured. `shim-unsigned` is the same shim without Microsoft's signature, which option 1 does not need.
 
 Keep GRUB, `initramfs-tools` and (option 1) the signed shim packages from coming back:
 
@@ -499,7 +514,7 @@ Pin-Priority: -1
 EOF
 ```
 
-Option 1 also keeps the signed shim packages out, so an upgrade never pulls them back in:
+Option 1 also keeps the signed shim packages out, so an upgrade never pulls them back in (`shim-signed`'s install script refuses to run when Microsoft is not in `db`, which left dpkg half-configured in the test VM):
 
 ```bash
 cat >> /etc/apt/preferences.d/no-grub <<'EOF'
@@ -512,19 +527,18 @@ EOF
 
 The second block matters. `intel-microcode` and `amd64-microcode` recommend `initramfs-tools`. In the test VM, `apt install intel-microcode` without this pin removed dracut, rebuilt the UKI with an initramfs-tools initrd that has no cryptsetup, and the next boot stopped in a BusyBox shell. With the pin, apt skips the recommendation and dracut rebuilds the UKI with the new microcode.
 
-Put shim in front of systemd-boot on the ESP. Both options start with:
+Set up the ESP. All options start with:
 
 ```bash
 ESP=$(bootctl --print-esp-path)
 rm -f "$ESP"/EFI/debian/grub* "$ESP"/EFI/BOOT/grub*
 ```
 
-Option 1, your own directory. The boot entry comes after the files are signed (below):
+Option 1, systemd-boot alone:
 
 ```bash
 rm -rf "$ESP/EFI/debian"
-bootctl install --no-variables       # keeps systemd-boot as the removable-media fallback EFI/BOOT/BOOTX64.EFI
-install -d "$ESP/EFI/shim"
+bootctl install       # EFI/systemd/, the fallback EFI/BOOT/BOOTX64.EFI, and a "Linux Boot Manager" boot entry first
 ```
 
 Option 2, Debian's systemd-boot package does it. With signed GRUB gone and signed shim present, it installs shim and MokManager in `EFI/debian/` and creates a "Debian" boot entry:
@@ -532,8 +546,6 @@ Option 2, Debian's systemd-boot package does it. With signed GRUB gone and signe
 ```bash
 dpkg-reconfigure systemd-boot
 ```
-
-Option 1 keeps shim out of `EFI/debian/` on purpose. Without `shim-signed`, the systemd-boot package deletes `EFI/debian/shim*` whenever the shim packages change.
 
 Drop the Type #1 entries the systemd-boot package created:
 
@@ -553,7 +565,7 @@ editor no
 
 ### Re-sign the boot files with your key
 
-shim will soon distrust Debian's certificate (section 12), so every boot file shim loads (systemd-boot, MokManager, the fallback loader, all from Debian) must carry your signature instead of Debian's, and only yours: a file that still carries Debian's signature next to yours is refused. In option 1 the firmware also needs your signature on shim, and shim must be copied from `/usr/lib/shim` whenever the package updates it. `sbctl sign` adds a signature next to the existing one, so it does not fit here. A small script copies, strips and re-signs instead.
+Every boot file must carry your signature, and only yours. In option 1 the firmware checks systemd-boot against your `db` key, and systemd-boot must be copied from the package whenever it is updated. In option 2, shim will soon distrust Debian's certificate (section 12), so every boot file shim loads (systemd-boot, MokManager, the fallback loader, all from Debian) must carry your signature instead of Debian's: a file that still carries Debian's signature next to yours is refused. `sbctl sign` adds a signature next to the existing one, so it does not fit here. A small script copies, strips and re-signs instead.
 
 Which key signs what, `/etc/kernel/esp-signing.conf`:
 
@@ -561,8 +573,8 @@ Which key signs what, `/etc/kernel/esp-signing.conf`:
 # Option 1:
 KEY=/var/lib/sbctl/keys/db/db.key
 CERT=/var/lib/sbctl/keys/db/db.pem
-COPY="/usr/lib/shim/shimx64.efi:/boot/efi/EFI/shim/shimx64.efi /usr/lib/shim/mmx64.efi:/boot/efi/EFI/shim/mmx64.efi /usr/lib/systemd/boot/efi/systemd-bootx64.efi:/boot/efi/EFI/systemd/systemd-bootx64.efi /usr/lib/systemd/boot/efi/systemd-bootx64.efi:/boot/efi/EFI/BOOT/BOOTX64.EFI"
-FILES="/boot/efi/EFI/shim/shimx64.efi /boot/efi/EFI/shim/mmx64.efi /boot/efi/EFI/systemd/systemd-bootx64.efi /boot/efi/EFI/BOOT/BOOTX64.EFI"
+COPY="/usr/lib/systemd/boot/efi/systemd-bootx64.efi:/boot/efi/EFI/systemd/systemd-bootx64.efi /usr/lib/systemd/boot/efi/systemd-bootx64.efi:/boot/efi/EFI/BOOT/BOOTX64.EFI"
+FILES="/boot/efi/EFI/systemd/systemd-bootx64.efi /boot/efi/EFI/BOOT/BOOTX64.EFI"
 # Option 2 instead (shim keeps Microsoft's signature, so it is not in the list):
 # KEY=/etc/kernel/secure-boot-private-key.pem
 # CERT=/etc/kernel/secure-boot-certificate.pem
@@ -610,22 +622,14 @@ Then run it once by hand:
 /usr/local/sbin/resign-esp
 ```
 
-The script restores a file from its package whenever the ESP copy is not signed by you, rather than signing whatever is there. If something else writes to those paths (a `grub-install`, another tool), its file is replaced, never signed with your key. Package updates of shim or systemd-boot change the boot files: option 2's packages put Debian-signed copies back on the ESP, and in option 1 a new shim lands in `/usr/lib/shim`. In the test VM, reinstalling those packages did exactly that, and the hook copied and re-signed every file before the next boot.
+The script restores a file from its package whenever the ESP copy is not signed by you, rather than signing whatever is there. If something else writes to those paths (a `grub-install`, another tool), its file is replaced, never signed with your key. Package updates of shim or systemd-boot change the boot files: option 2's packages put Debian-signed copies back on the ESP, and in option 1 a new systemd-boot lands in `/usr/lib`. In the test VM, reinstalling those packages did exactly that, and the hook copied and re-signed every file before the next boot.
 
-Option 1 only, the boot entry: the firmware starts your shim, and shim starts systemd-boot. This is the same form Debian's own script uses for option 2:
-
-```bash
-part=$(findmnt -nvo SOURCE "$ESP"); disk=/dev/$(lsblk -no PKNAME "$part"); num=$(cat /sys/class/block/${part##*/}/partition)
-efibootmgr --create --disk "$disk" --part "$num" --loader '\EFI\shim\shimx64.efi' \
-  --label 'Debian (own shim)' --unicode '\EFI\systemd\systemd-bootx64.efi \0'
-```
-
-`efibootmgr` puts the new entry first. The "Linux Boot Manager" entry points at systemd-boot directly, without shim, so DKMS modules would not load on that path. Delete it with `efibootmgr -b XXXX -B`, where XXXX is its number, or leave it as a later fallback.
+Option 1 needs no extra boot entry: `bootctl install` created "Linux Boot Manager", which starts `\EFI\systemd\systemd-bootx64.efi`. Option 2's entry was created by `dpkg-reconfigure systemd-boot` above.
 
 Check:
 
 ```bash
-efibootmgr | grep -E 'BootOrder|Debian'     # "Debian (own shim)" (option 1) or "Debian" (option 2) first
+efibootmgr | grep -E 'BootOrder|Linux Boot Manager|Debian'   # first: "Linux Boot Manager" (option 1) or "Debian" (option 2)
 bootctl list
 ukify inspect "$ESP"/EFI/Linux/*.efi | grep -A3 -E '^\.(cmdline|pcrsig)'
 for f in $(. /etc/kernel/esp-signing.conf; echo $FILES); do [ -f "$f" ] && sbverify --list "$f" | grep subject; done
@@ -639,7 +643,7 @@ Option 1: reboot straight into the firmware setup, clear the Secure Boot keys (o
 systemctl reboot --firmware-setup
 ```
 
-A normal reboot fails at this point in option 1: the firmware still has Microsoft's keys and does not accept your shim. If that happens, enter the firmware setup and clear the keys.
+A normal reboot fails at this point in option 1: the firmware still has Microsoft's keys and does not accept your systemd-boot. If that happens, enter the firmware setup and clear the keys.
 
 Option 2: a normal reboot.
 
@@ -654,9 +658,9 @@ systemd-analyze pcrs
 
 Expect `Measured UKI: yes` and PCR 8 all zeros.
 
-## 12. Enroll your keys and distrust Debian
+## 12. Enroll your keys (option 1) or distrust Debian (option 2)
 
-### Option 1: enroll your Secure Boot keys and the DKMS key
+### Option 1: enroll your Secure Boot keys
 
 The machine is in Setup Mode now (end of section 10):
 
@@ -672,20 +676,17 @@ Reboot. Some firmware turns Secure Boot on as soon as a PK is enrolled (OVMF doe
 mokutil --sb-state            # SecureBoot enabled
 ```
 
-Enroll the DKMS key as a MOK, then reboot and confirm it in MokManager (section 6):
+If you build kernel modules (NVIDIA, ZFS, VirtualBox), have DKMS sign them with your `db` key, `/etc/dkms/framework.conf.d/db-key.conf`:
 
 ```bash
-dkms generate_mok
-mokutil --import /var/lib/dkms/mok.pub
+openssl x509 -in /var/lib/sbctl/keys/db/db.pem -outform DER -out /var/lib/sbctl/keys/db/db.der
+printf 'mok_signing_key=/var/lib/sbctl/keys/db/db.key\nmok_certificate=/var/lib/sbctl/keys/db/db.der\n' > /etc/dkms/framework.conf.d/db-key.conf
+dkms autoinstall                                  # rebuild what is already installed, now signed with the db key
 ```
 
-After the reboot:
+Check one module: `modinfo -F signer <module>.ko` prints your `db` certificate's name (`Database Key` with sbctl's defaults), and `modprobe` loads it. Tested in the VM with a DKMS module, before and after a kernel upgrade.
 
-```bash
-mokutil --list-enrolled | grep 'Subject: CN'     # must list "DKMS module signing key"
-```
-
-### Both options: deny Debian's certificate in shim
+### Option 2: deny Debian's certificate in shim
 
 Why: section 2. Do this only after section 10's script has re-signed systemd-boot and MokManager, and after a successful boot through them. Otherwise shim refuses its own next stage and the machine stops at the firmware.
 
@@ -810,9 +811,9 @@ journalctl -b -u 'systemd-cryptsetup@*'
 
 Nothing to do. On `apt upgrade`, the kernel package runs `/etc/kernel/postinst.d/zz-systemd-boot`, which calls `kernel-install`, which runs dracut and ukify. ukify signs the UKI with your key and signs its PCR 11 value with your PCR key. Tested in the VM with both options: an upgrade from 6.12 to the 7.2 backports kernel booted and decrypted without resealing.
 
-DKMS rebuilds its modules for the new kernel and signs them with `/var/lib/dkms/mok.key`. Because that key is a MOK, they load. In the VM, a module signed that way loaded with Secure Boot on and kernel lockdown active, in both options.
+DKMS rebuilds its modules for the new kernel and signs them with your `db` key (option 1) or the MOK key `/var/lib/dkms/mok.key` (option 2). Install `linux-headers-amd64` next to `linux-image-amd64`, or DKMS has nothing to build against. In the VM, a DKMS module was rebuilt during the upgrade to 7.2, signed, and loaded with Secure Boot on and kernel lockdown active, in both options.
 
-Updates to shim or systemd-boot change the boot files. The apt hook from section 10 copies (option 1) and re-signs them before you can reboot.
+Updates to shim or systemd-boot change the boot files. The apt hook from section 10 copies them from their packages and re-signs them before you can reboot.
 
 Old UKIs are removed when their kernel package is removed.
 
@@ -824,9 +825,53 @@ for k in /boot/vmlinuz-*; do kernel-install add "${k#/boot/vmlinuz-}" "$k"; done
 
 `kernel-install add-all` does not work for this on Debian: it looks for kernels under `/usr/lib/modules/*/vmlinuz`, where Debian does not put them.
 
+### Fall back to the previous kernel when a new one does not boot
+
+systemd-boot can count boot attempts. Turn it on with:
+
+```bash
+echo 3 > /etc/kernel/tries
+```
+
+From then on `kernel-install` names each new UKI `<machine-id>-<version>+3.efi`. systemd-boot counts down every time it starts one. Once the system reaches `boot-complete.target`, `systemd-bless-boot` removes the counter. A UKI that has used its three tries without being blessed (`+0-3`) sorts below the others, so the previous kernel starts. Existing UKIs keep their names until they are rebuilt.
+
+Tested in the VM: a correctly signed UKI that could not find its root device was started three times (each time the initrd gave up and halted, because of `rd.emergency=halt`), then systemd-boot started the previous kernel, which opened the disk from the TPM. A halted machine needs a reset or a power cycle for the next try, so on a server keep the remote console or a hardware watchdog in mind.
+
+### Check before you reboot
+
+`check-next-boot` (from `skills/luks-tpm2-uki/scripts/` in the repository, installed to `/usr/local/sbin/`) is read-only and answers "will the next boot open the disk from the TPM?" It checks the UKI systemd-boot will start by default (one signature, yours; `.pcrsig`; the PCR public key; the command line; `systemd-pcrphase` in the initrd), the boot files on the ESP, that `initramfs-tools` is absent, the LUKS TPM token, that the policy in the TPM covers every recorded component, and whether PCR 1 (boot entries, boot order) and PCR 7 (Secure Boot variables) will measure what they did this boot:
+
+```bash
+check-next-boot          # exit 0: no problem found
+```
+
+In the VM it flagged each of these before the reboot that would have asked for the passphrase: an unsigned UKI made the default, a UKI with the wrong command line, `efibootmgr -o` changing the boot order, and a hash appended to `db`.
+
 ## 15. Firmware updates, BIOS changes and shim updates
 
-Anything that changes a locked PCR makes the next boot ask for the passphrase: a firmware update, a BIOS setting, the boot order, Secure Boot `db`/`dbx` updates. A shim update that raises its SBAT level changes PCR 7 as well (expected from how shim measures, not tested). To re-lock:
+Anything that changes a locked PCR makes the next boot ask for the passphrase: a firmware update, a BIOS setting, the boot order, Secure Boot `db`/`dbx` updates. A shim update that raises its SBAT level changes PCR 7 as well (expected from how shim measures, not tested).
+
+### Planned: no passphrase prompt
+
+`pcrlock-update` (from `skills/luks-tpm2-uki/scripts/`, installed to `/usr/local/sbin/`) narrows the policy before the change and restores it after:
+
+```bash
+pcrlock-update open 0,1,2,3     # before a firmware update or BIOS change: lock only PCR 7 (and 13)
+# update the firmware or change the setting, reboot: the disk opens from the TPM
+pcrlock-update close            # re-record every component, lock the full list from /etc/kernel/pcrlock-pcrs again
+```
+
+PCR 7 can never be dropped. Neither step asks for the recovery PIN while the machine still matches the policy in force. In the VM, switching to a different firmware build changed PCRs 0, 1 and 2 (the firmware's own tables are measured into PCR 1), so `open 0,2` was not enough and `open 0,1,2,3` was. Between `open` and `close` the TPM checks fewer PCRs, so keep that window short. `check-next-boot` warns while it is open.
+
+For a planned Secure Boot variable change (a new `db` or `dbx` entry you add yourself), run `pcrlock-update close` right after writing the variable and before rebooting: `lock-secureboot-policy` records the new values. `check-next-boot` fails until you do.
+
+If a firmware update resets the Secure Boot keys or applies a vendor `dbx` update, PCR 7 changes too: expect one passphrase prompt, then re-lock as below.
+
+fwupd's UEFI capsule updater (`fwupdx64.efi`) is signed by Debian, which your `db` does not trust in option 1. Sign it with your `db` key, or flash from the firmware menu or a USB stick. Not tested here: OVMF has no capsule updates.
+
+### Unplanned: re-lock with the recovery PIN
+
+To re-lock after a change you did not prepare for:
 
 1. Boot with the passphrase.
 2. Re-record what changed, for example:
@@ -846,7 +891,23 @@ Anything that changes a locked PCR makes the next boot ask for the passphrase: a
    $PCRLOCK make-policy --pcr=$PCRS --recovery-pin=query
    ```
 
-No `systemd-cryptenroll` needed: the LUKS token points to the same NV index. Tested in the VM by changing the boot order, and by the PCR 7 change that denying Debian's certificate causes.
+`pcrlock-update close` does steps 2 and 3 in one go, and asks for the PIN only when the current boot does not match the policy in force.
+
+`--recovery-pin=query` makes `make-policy` use the PIN every time, even when the machine still matches the policy. Without the option, the update is accepted on the strength of the current PCR values and the PIN stays the same. Tested in the VM: with the option, an empty or wrong PIN failed with `Failed to write to NV index` (TPM_RC 0x99d, policy check failed), even on a boot that matched.
+
+No `systemd-cryptenroll` needed: the LUKS token points to the same NV index. Do not use `systemd-pcrlock remove-policy` to start over: the next `make-policy` creates a new NV index, the token still names the old one, and every boot asks for the passphrase ("Couldn't find pcrlock policy for volume") until you enroll the TPM again with the `systemd-cryptenroll` command from section 13. Seen on a real host, reproduced in the VM. Tested in the VM by changing the boot order, by the PCR 7 change that denying Debian's certificate causes, and by switching firmware builds without `open`.
+
+### Get told when the TPM did not open the disk
+
+A changed PCR does not show until the next reboot, which on a server may be unattended. `tpm-unlock-check` runs once per boot and sends a mail to root (and a critical journal message) when a TPM-enrolled volume was opened by passphrase or recovery key:
+
+```bash
+install -m 0755 tpm-unlock-check /usr/local/sbin/
+install -m 0644 tpm-unlock-check.service /etc/systemd/system/
+systemctl daemon-reload && systemctl enable tpm-unlock-check.service
+```
+
+It reads the journal: with systemd 257, a TPM unlock logs nothing from `systemd-cryptsetup`, a passphrase or recovery key logs `Set cipher ... for device <the volume>`, and a TPM refusal logs `TPM2 operation failed, falling back`. Tested in the VM after a firmware switch (alert), and on normal boots (no alert).
 
 If you run `make-policy` without `--recovery-pin=query` in this situation, it fails with `Failed to add OR policy to TPM: tpm:parameter(1):value is out of range` (TPM_RC 0x1c4). That error means "the current PCRs match none of the predicted values".
 
@@ -860,31 +921,37 @@ openssl x509 -inform der -in /etc/kernel/debian-secure-boot-ca.der -noout -finge
 
 ## 16. Verify the protections
 
-Results from the test VM. `testbench/run-all.sh` runs the rows marked "run-all" for one option from a factory-state VM. "Earlier chain" rows were run on the same option before Debian's certificate was denied. "No shim" is the stricter variant from section 2, tested before shim was added. Rows only run there test pcrlock and package behaviour that does not depend on shim.
+Results from the test VM. `testbench/run-all.sh` runs the rows marked "run-all" for one option from a factory-state VM, and every row marked so passed in the last full run of both options. "Earlier" rows were run once on the chain named in the cell. Option 1 also passed every run-all row on Debian testing (forky: systemd 262, dracut 112, kernel 7.2.15 upgraded to 7.3.4), with the two changes noted in sections 7 and 8. The third column is own keys with shim (`SHIM=1`), the chain this guide used before option 1 dropped shim.
 
-| Test | Expected | Option 1 | Option 2 | No shim |
+| Test | Expected | Option 1 | Option 2 | Own keys + shim |
 |---|---|---|---|---|
 | Normal reboot (run-all) | No prompt | Pass | Pass | Pass |
 | Kernel upgrade, 6.12 to 7.2 backports (run-all) | No prompt, no reseal | Pass | Pass | Pass |
-| DKMS-signed module, Secure Boot on (run-all) | Loads | Pass | Pass | Rejected: `Key was rejected by service` |
+| Test module signed with the DKMS key; the same module unsigned (run-all) | Signed loads, unsigned refused | Pass: `db` key | Pass: MOK | Pass: MOK |
+| Real DKMS module, rebuilt during the kernel upgrade (run-all) | Signed and loads on the new kernel | Pass: `db` key | Pass: MOK | |
 | Extra boot entry passing `init=/bin/sh` to the signed UKI (run-all) | Option ignored, no prompt | Pass | Pass | Pass |
-| Debian-signed kernel + stock initrd from the ESP, PCR 7 and 11 replayed from software (run-all) | Kernel refused | Pass | Pass | Pass: firmware refuses the kernel |
-| Same, before Debian's certificate was denied | Kernel refused | Fails: key released | Fails: key released | |
-| Attacker enrolls their own MOK at the console, signs the Debian kernel with it, replays PCR 7 and 11 | TPM refuses | Pass: the new MOK's approval adds a PCR 7 entry that cannot be undone | | |
-| TPM-sealed credential `systemd.extra-unit.*` planted in `ESP/loader/credentials/` | Ignored | Pass: systemd marks ESP credentials untrusted and does not apply them | | |
-| Reinstall of the shim and systemd-boot packages (run-all) | Hook copies and re-signs, no prompt | Pass | Pass | systemd-boot only: Pass |
-| Unsigned (modified) UKI made the next boot | Refused | Pass: shim, `Security Policy Violation` (earlier chain) | Pass: shim, `Security Policy Violation` (earlier chain) | Pass: firmware, `Access denied` |
-| Secure Boot keys cleared in firmware | Passphrase prompt | Pass (earlier chain) | Pass (earlier chain) | Pass |
-| Forced initrd failure (LUKS header UUID changed, no key needed) to reach a shell while PCRs still match | No shell | | | Pass: dracut's emergency mode refuses, the root account is locked in the initrd |
-| Same, with `rd.shell=0 rd.emergency=halt` in the UKI command line | Halts | | | Pass: "Could not boot. Halting."; normal boots still open automatically |
-| Boot order changed (PCR 1) | Passphrase prompt, re-lock with PIN restores automatic decryption | | | Pass |
-| Running system asks the TPM for the key with the UKI's signature | Refused: no signature for the post-initrd PCR 11 | | | Pass |
-| Policy without PCR 7 (13, 14 only), Secure Boot keys cleared | Should prompt | | | Fails: key released. This is why PCR 7 is required |
-| Policy with PCR 7 only, Secure Boot keys cleared | Passphrase prompt | | | Pass |
-| Old kernel package purged | Its UKI removed from the ESP | | | Pass |
-| Recovery key enrolled next to the TPM slot | Still no prompt | | | Pass |
-| `apt install intel-microcode amd64-microcode` with the `initramfs-tools` pin | dracut kept, UKI rebuilt, no prompt | | | Pass |
-| Same without the pin | | | | Fails: dracut removed, boot stops in BusyBox |
+| Debian-signed kernel + stock initrd from the ESP, PCR 7 and 11 replayed from software (run-all) | Kernel refused | Pass: the firmware refuses it | Pass: shim refuses it (MokListX) | Pass: shim refuses it |
+| Same, before Debian's certificate was denied | Kernel refused | Not applicable: Debian is never trusted | Fails: key released | Fails: key released |
+| Attacker enrolls their own MOK at the console, signs the Debian kernel with it, replays PCR 7 and 11 | TPM refuses | Not applicable: no MokManager | | Pass: the new MOK's approval adds a PCR 7 entry that cannot be undone |
+| TPM-sealed credential `systemd.extra-unit.*` planted in `ESP/loader/credentials/` | Ignored | | | Pass: systemd marks ESP credentials untrusted and does not apply them |
+| Reinstall of the shim and systemd-boot packages (run-all) | Hook copies and re-signs, no prompt | Pass (systemd-boot) | Pass | Pass |
+| Unsigned (modified) UKI made the next boot | Refused | Pass: firmware, `Access denied` (earlier) | Pass: shim, `Security Policy Violation` (earlier) | Pass: shim (earlier) |
+| Secure Boot keys cleared in firmware | Passphrase prompt | Pass (earlier) | Pass (earlier) | Pass (earlier) |
+| Forced initrd failure (LUKS header UUID changed, no key needed) to reach a shell while PCRs still match | No shell | Pass: dracut's emergency mode refuses, the root account is locked in the initrd (earlier) | | |
+| Same, with `rd.shell=0 rd.emergency=halt` in the UKI command line | Halts | Pass: "Could not boot. Halting."; normal boots still open automatically (earlier) | | |
+| Boot order changed (PCR 1) | Passphrase prompt, re-lock with PIN restores automatic decryption | Pass (earlier) | | |
+| Running system asks the TPM for the key with the UKI's signature | Refused: no signature for the post-initrd PCR 11 | Pass (earlier) | | |
+| Policy without PCR 7 (13, 14 only), Secure Boot keys cleared | Should prompt | Fails: key released. This is why PCR 7 is required (earlier) | | |
+| Policy with PCR 7 only, Secure Boot keys cleared | Passphrase prompt | Pass (earlier) | | |
+| Old kernel package purged | Its UKI removed from the ESP | Pass (earlier) | | |
+| `apt install intel-microcode amd64-microcode` with the `initramfs-tools` pin | dracut kept, UKI rebuilt, no prompt | Pass (earlier) | | |
+| Same without the pin | | Fails: dracut removed, boot stops in BusyBox (earlier) | | |
+| Boot counting (run-all) | Booted UKI blessed; a signed UKI that cannot find its root device is tried 3 times, then skipped | Pass | Pass | |
+| `check-next-boot` (run-all) | Passes on a healthy system, fails on that broken UKI | Pass | Pass | |
+| Planned firmware update: `pcrlock-update open 0,1,2,3`, switch to another firmware build, `close` (run-all) | No prompt, full policy afterwards | Pass | Pass | |
+| Unplanned firmware switch (run-all) | Prompt; recovery key opens the disk; `tpm-unlock-check` alerts; `pcrlock-update close` with the PIN restores automatic decryption | Pass | Pass | |
+| `systemd-pcrlock remove-policy`, then `make-policy`, no re-enrollment | Prompt ("Couldn't find pcrlock policy for volume"); `check-next-boot` names it; re-enrolling fixes it | Pass (earlier) | | |
+| A hash appended to `db`, or `efibootmgr -o`, before a reboot | `check-next-boot` fails before the reboot | | | Pass (earlier) |
 
 On your own machine you can repeat the unsigned-UKI and cmdline tests safely: keep the passphrase handy, and delete the extra file from the ESP afterwards.
 
@@ -897,7 +964,9 @@ DEV=/dev/nvme0n1p2
 install -d -m 0700 /root/recovery-backup
 cryptsetup luksHeaderBackup $DEV --header-backup-file /root/recovery-backup/luks-header.img
 cp -a /etc/systemd/tpm2-pcr-private-key.pem /etc/systemd/tpm2-pcr-public-key.pem /etc/kernel/pcrlock-pcrs /root/recovery-backup/
-cp -a /var/lib/dkms/mok.key /var/lib/dkms/mok.pub /etc/kernel/esp-signing.conf /etc/kernel/debian-secure-boot-ca.der /root/recovery-backup/
+for f in /var/lib/dkms/mok.key /var/lib/dkms/mok.pub /etc/kernel/esp-signing.conf /etc/kernel/debian-secure-boot-ca.der; do
+  [ -e "$f" ] && cp -a "$f" /root/recovery-backup/      # the DKMS key and Debian's certificate exist only in option 2
+done
 if [ -d /var/lib/sbctl ]; then                      # option 1
   cp -a /var/lib/sbctl /root/recovery-backup/sbctl
 else                                                # option 2
@@ -909,11 +978,14 @@ rm -rf /root/recovery-backup
 
 Move `/root/recovery-backup.tar.gpg` to offline storage and delete the local copy. The archive holds your signing keys: anyone who has them can sign a kernel or a module your machine will trust.
 
-A LUKS recovery key is a good second fallback next to your passphrase:
+Add a LUKS recovery key as a second fallback next to your passphrase. It is printed once: write it on paper or put it in a password manager, never in a file on this machine:
 
 ```bash
 systemd-cryptenroll --recovery-key $DEV
+cryptsetup luksDump $DEV | grep systemd-recovery     # the token is there
 ```
+
+It is typed at the same prompt as the passphrase. Tested in the VM: after an unplanned firmware change, the recovery key opened the disk and `pcrlock-update close` with the recovery PIN restored automatic decryption.
 
 ## 18. Changes from the previous version of this guide
 
@@ -927,12 +999,14 @@ Found by running the old guide's steps in the VM:
 - PCR 8 binding is removed. With systemd-boot and a UKI, PCR 8 is always zero. Command line protection comes from the signed UKI and systemd-stub, verified by test.
 - The pcrlock PCR set is a per-host choice kept in one place (`/etc/kernel/pcrlock-pcrs`), with PCR 7 required. Without PCR 7 the VM released the key with Secure Boot off.
 - `make-policy` now gets an explicit PCR list without PCR 12, and a recovery PIN. With the defaults, the first reboot failed (PCR 12 changed) and the policy could not be repaired without re-enrolling.
-- Debian's shim stays in the boot chain, set up by the systemd-boot package itself, so MOK and DKMS modules work. Without shim, DKMS modules were rejected.
+- Option 1 has no shim: the firmware starts systemd-boot, Debian's certificate is never trusted, and DKMS signs with the `db` key, which Debian's kernel accepts for modules (tested). An earlier version of this guide said that kernel refused `db` keys; that test had signed with a key enrolled nowhere.
 - shim distrusts Debian's certificate (MokListX), and systemd-boot and MokManager carry your signature instead. Without that, a Debian kernel with an attacker's initrd got the disk key from the TPM in the VM.
-- Option 1 uses `shim-unsigned`, signed by you, in its own ESP directory. `shim-signed` refuses to install or upgrade when Microsoft is not in `db`, which broke apt in the VM.
+- `shim-signed` refuses to install or upgrade when Microsoft is not in `db`, which broke apt in the VM, so option 1 pins it out.
 - Two Secure Boot options instead of one: your own keys (default) or the factory Microsoft keys with your key as a MOK. Option 2 enrolls its key before the boot packages are installed, and option 1 reboots straight into Setup Mode, because both were unbootable in the VM otherwise.
 - GRUB and `initramfs-tools` are pinned away. Installing a microcode package otherwise swaps dracut out and makes the machine unbootable.
 - An apt hook re-signs the boot files after package updates, leaving exactly one signature, yours.
 - `systemd-pcrlock` lives in `/usr/lib/systemd/`, not in `$PATH`.
 - The PCR signing key moved to systemd's conventional `/etc/systemd/tpm2-pcr-private-key.pem` and `/etc/systemd/tpm2-pcr-public-key.pem`.
 - The 0x1c4 error is not a "branch limit". It means the current PCR values match none of the policy's predicted values.
+- Operations, each tested in the VM: boot counting with fallback to the previous kernel, `check-next-boot` before reboots, `pcrlock-update` for planned firmware and BIOS changes, `tpm-unlock-check` for alerts, and a recovery key.
+- `--recovery-pin=query` always uses the PIN. Leave it out for updates while the machine still matches the policy.

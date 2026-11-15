@@ -1,0 +1,32 @@
+#!/bin/sh
+# tpm-unlock-check: after boot, report whether the TPM opened the disk or someone typed a
+# passphrase or recovery key. Install as /usr/local/sbin/tpm-unlock-check with tpm-unlock-check.service.
+#
+# Markers seen with systemd 257: a TPM unlock logs nothing from systemd-cryptsetup; a passphrase or
+# recovery key logs "Set cipher ... for device <the volume>", and a TPM refusal logs
+# "TPM2 operation failed, falling back". Only volumes with tpm2-device= in /etc/crypttab are checked.
+set -u
+log=$(journalctl -b -o cat -t systemd-cryptsetup 2>/dev/null)
+bad=""
+for uuid in $(awk '!/^#/ && /tpm2-device=/ { sub(/^UUID=/, "", $2); print $2 }' /etc/crypttab); do
+  if echo "$log" | grep -q "Set cipher .*$uuid"; then bad="$bad $uuid"; fi
+done
+if echo "$log" | grep -q 'TPM2 operation failed'; then bad="$bad (TPM refused)"; fi
+
+if [ -z "$bad" ]; then
+  echo "tpm-unlock-check: the TPM opened every TPM-enrolled volume"
+  exit 0
+fi
+host=$(hostname)
+msg="$host: the disk was NOT opened by the TPM this boot:$bad.
+Someone typed the passphrase or a recovery key. Expected after a firmware update, a BIOS setting or
+boot order change, or a Secure Boot key change; otherwise find out what changed.
+  journalctl -b -t systemd-cryptsetup
+  /usr/lib/systemd/systemd-pcrlock log | grep -- ' - '   (events the policy does not know)
+To restore automatic unlocking once the change is expected: pcrlock-update close"
+logger -p auth.crit -t tpm-unlock-check "the disk was NOT opened by the TPM this boot:$bad"
+if [ -x /usr/sbin/sendmail ]; then
+  printf 'To: root\nSubject: TPM did not unlock the disk on %s\n\n%s\n' "$host" "$msg" | /usr/sbin/sendmail root || true
+fi
+echo "$msg" >&2
+exit 1

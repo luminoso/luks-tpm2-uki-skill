@@ -1,0 +1,49 @@
+name: e2e
+
+# Replays the guide in a QEMU/OVMF/swtpm VM for each boot chain: setup from a factory-state PC,
+# attacks, package and kernel updates, boot counting, firmware updates, recovery.
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Debian suite for the target (trixie, or forky for testing)
+        default: trixie
+  schedule:
+    - cron: "17 3 * * 1"     # weekly: trixie and testing
+
+jobs:
+  e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        chain:
+          - { name: own-keys-no-shim, option: 1, shim: 0 }
+          - { name: own-keys-shim, option: 1, shim: 1 }
+          - { name: microsoft-keys, option: 2, shim: 1 }
+        suite: ${{ github.event_name == 'schedule' && fromJSON('["trixie","forky"]') || fromJSON(format('["{0}"]', inputs.suite || 'trixie')) }}
+    name: ${{ matrix.chain.name }} (${{ matrix.suite }})
+    continue-on-error: ${{ matrix.suite != 'trixie' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - name: Run
+        run: |
+          docker run --rm --device /dev/kvm -v "$PWD:/w" -w /w/testbench \
+            -e OPTION=${{ matrix.chain.option }} -e SHIM=${{ matrix.chain.shim }} -e SUITE=${{ matrix.suite }} \
+            registry.fedoraproject.org/fedora:45 bash ci.sh
+      - name: Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ matrix.chain.name }}-${{ matrix.suite }}
+          path: |
+            testbench/run/*.log
+            testbench/run/*/serial.log
+          if-no-files-found: ignore

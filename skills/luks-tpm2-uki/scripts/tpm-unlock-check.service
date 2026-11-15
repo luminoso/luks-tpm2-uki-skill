@@ -1,0 +1,10 @@
+[Unit]
+Description=Warn when the disk was not opened by the TPM
+After=local-fs.target systemd-journal-flush.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/tpm-unlock-check
+
+[Install]
+WantedBy=multi-user.target

@@ -11,6 +11,11 @@ Each entry: what happened, why, what fixed it. "VM" means the QEMU/OVMF/swtpm te
 - `Phases=` default signs every phase. With only `enter-initrd` signed, the running system holding the UKI's signature still got "No matching TPM2 token data found". VM.
 - Planned firmware variable change without a prompt works by keeping the old pcrlock component as a second variant before the change. VM, `db` rewrite.
 - `Esys_Unseal ... 0x128` in the journal before the disk opens is TPM_RC_PCR_CHANGED, a race systemd retries. Harmless.
+- `make-policy --recovery-pin=query` always authorizes the NV write with the PIN. Fed no PIN on a boot that matched the policy, it failed with TPM_RC 0x99d (policy check failed); without the option the same update went through and the PIN stayed the same. VM.
+- A firmware build from another edk2 release changed PCRs 0, 1 and 2. PCR 1 changed through `efi-handoff-tables`. Dropping only 0 and 2 before the switch still prompted; dropping 0 to 3 did not. VM.
+- `systemd-pcrlock remove-policy` followed by `make-policy` creates a new NV index; the LUKS token still names the old one (`tpm2_pcrlock_nv` in `cryptsetup token export`). The next boot printed "No pcrlock policy found among system credentials. Couldn't find pcrlock policy for volume." and asked for the passphrase. Host, then reproduced in the VM; `systemd-cryptenroll --wipe-slot=tpm2 ...` against the new policy fixed it. To re-lock, run `make-policy` again: it updates the same NV index. `check-next-boot` now compares the token's NV index with the policy's.
+- Some firmware creates its own boot entry for `EFI/BOOT/BOOTX64.EFI` once that file appears ("UEFI OS", optional data `BO`). On a UGREEN DXP2800 that changed the boot entries and BootOrder, so PCR 1, on the next boot: the disk asked for the passphrase. Host. Before adding the fallback loader on a host that locks PCR 1, `pcrlock-update open 1`, boot once, then `close`; or leave PCR 1 out.
+- A `db` entry appended with `efi-updatevar` and recorded with `lock-secureboot-policy` + `make-policy` before the reboot opened automatically; not recording it prompted. VM.
 
 ## Boot chain
 
@@ -20,6 +25,13 @@ Each entry: what happened, why, what fixed it. "VM" means the QEMU/OVMF/swtpm te
 - Command line injection through an extra boot entry (`init=/bin/sh`) was ignored by systemd-stub under Secure Boot. VM, `tests/n1-cmdline-inject.sh`.
 - Planted TPM-sealed credential (`systemd.extra-unit.*`) in `ESP/loader/credentials/` was received as untrusted and not applied. VM.
 - Forced initrd failure (LUKS header UUID changed, no key needed) reached dracut's emergency mode, which refused a shell because the root account is locked inside the initrd. VM. The initramfs-tools initrd, in an earlier failure, gave a passwordless BusyBox shell. With `rd.shell=0 rd.emergency=halt` in the UKI command line, the same forced failure printed "Could not boot. Halting." and stopped; normal boots still opened automatically. VM, no-shim chain.
+
+## Operations
+
+- Boot counting (`/etc/kernel/tries`) works with signed UKIs: kernel-install names them `+3.efi`, `systemd-bless-boot` removed the counter after a good boot, and a correctly signed UKI with a missing root device was started 3 times (the initrd halted each time, after dracut's `rd.retry` timeout, 180 s by default), then marked `+0-3` and skipped; the previous kernel opened the disk from the TPM. VM.
+- Journal markers for the unlock alert (systemd 257): a TPM unlock logs nothing from `systemd-cryptsetup`; a passphrase or recovery key logs `Set cipher ... for device <the volume>`; a TPM refusal logs `TPM2 operation failed, falling back to traditional unlocking`. VM, compared across 13 boots.
+- `check-next-boot` caught an unsigned UKI made the default, a UKI with a different command line, a changed BootOrder and a `db` change, each before the reboot. Two bugs found on the way: `cmd | grep -q` under `pipefail` reports failure when `cmd` gets SIGPIPE, and an empty `pcrlock predict` (pcrlock busy) must count as a mismatch, not a pass. VM.
+- A recovery key is typed at the same prompt as the passphrase and opened the disk after an unplanned firmware change. VM.
 
 ## Packages and updates
 
@@ -39,8 +51,9 @@ Each entry: what happened, why, what fixed it. "VM" means the QEMU/OVMF/swtpm te
 
 ## Kernel module trust
 
-- Debian's kernel refused a module signed with Debian's DKMS key without shim (`Key was rejected by service`). `db` certificates land in the `.platform` keyring, which Debian does not use for modules; MOK keys reach `.machine` only through shim.
-- The Proxmox kernel loaded a DKMS module signed by a certificate that was only in `db`. Host. So on Proxmox the no-shim chain works with DKMS, signed by the `db` key.
+- Debian's kernel accepts modules signed by a key that is only in firmware `db`, without shim. VM, kernel 6.12 with Secure Boot on and lockdown `integrity`: the `db`-signed module loaded; the same module unsigned, and signed with a random key, was refused (`Key was rejected by service`). A real DKMS module signed with the `db` key (`/etc/dkms/framework.conf.d/db-key.conf`) loaded, and was rebuilt and loaded after the upgrade to 7.2.
+- Mistake made and corrected: an earlier no-shim run signed the test module with the DKMS key, which was enrolled nowhere, saw `Key was rejected by service`, and concluded that Debian ignores `db` for modules. A module test needs two controls: the same module unsigned must be refused, and the signing key must be the one actually enrolled.
+- The Proxmox kernel loaded a DKMS module signed by a certificate that was only in `db`. Host.
 
 ## Test bench pitfalls
 

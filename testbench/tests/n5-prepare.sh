@@ -8,7 +8,7 @@ $P log --json=short > $D/legit-log.json
 cp /run/log/systemd/tpm2-measure.log $D/legit-userspace.log
 U=$(ls $ESP/EFI/Linux/*.efi | sort -V | tail -1)
 ukify --json=short inspect "$U" | python3 -c 'import json,sys; print(json.load(sys.stdin)[".pcrsig"]["text"])' > $D/pcrsig.json
-K=$(ls /boot/vmlinuz-6.12* | head -1); V=${K#/boot/vmlinuz-}
+K=$(ls /boot/vmlinuz-* | sort -V | head -1); V=${K#/boot/vmlinuz-}   # a Debian-signed kernel
 sbverify --list "$K" | grep -i subject
 [ -f /boot/initrd.img-$V ] || dracut -f /boot/initrd.img-$V $V
 mkdir -p $ESP/attack

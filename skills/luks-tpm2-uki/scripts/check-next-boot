@@ -1,0 +1,224 @@
+#!/bin/bash
+# check-next-boot: will the next boot open the disk from the TPM? Read-only. Run as root before
+# rebooting, after package updates, firmware or Secure Boot changes. Exit 0 = no FAIL found.
+#
+# Checks the UKI systemd-boot will start by default (signature, .pcrsig, PCR public key, command line,
+# systemd-pcrphase in the initrd), the boot files on the ESP, the initrd generator, the LUKS TPM token,
+# and whether locked PCRs 1 and 7 will measure the same values as this boot did.
+# Install as /usr/local/sbin/check-next-boot. Needs: sbsigntool, systemd-ukify, dracut (lsinitrd), tpm2-tools.
+set -u   # no pipefail: "cmd | grep -q" would fail on SIGPIPE
+P=/usr/lib/systemd/systemd-pcrlock
+fails=0
+ok()   { echo "OK    $*"; }
+warn() { echo "WARN  $*"; }
+fail() { echo "FAIL  $*"; fails=$((fails + 1)); }
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+[ "$(id -u)" = 0 ] || { echo "run as root"; exit 2; }
+
+# Which certificate signs boot files and UKIs.
+CERT=""
+[ -f /etc/kernel/esp-signing.conf ] && CERT=$(. /etc/kernel/esp-signing.conf; echo "$CERT")
+[ -n "$CERT" ] || CERT=$(sed -n 's/^SecureBootCertificate=//p' /etc/kernel/uki.conf 2>/dev/null | head -1)
+[ -f "$CERT" ] || { fail "no signing certificate found (esp-signing.conf CERT or uki.conf SecureBootCertificate)"; CERT=/dev/null; }
+# PCR public key: the one uki.conf embeds, else systemd's default path.
+PUB=$(sed -n 's/^PCRPKey=//p; s/^PCRPublicKey=//p' /etc/kernel/uki.conf 2>/dev/null | head -1)
+[ -n "$PUB" ] || PUB=/etc/systemd/tpm2-pcr-public-key.pem
+ours() { [ "$(sbverify --list "$1" 2>/dev/null | grep -c '^signature [0-9]')" = 1 ] && sbverify --cert "$CERT" "$1" >/dev/null 2>&1; }
+
+# Secure Boot
+if bootctl status 2>/dev/null | grep -q 'Secure Boot: enabled'; then ok "Secure Boot enabled"; else fail "Secure Boot is not enabled"; fi
+
+# Default boot entry
+bootctl list --json=short > "$tmp/entries.json" 2>/dev/null
+read -r etype epath etries < <(python3 -c '
+import json, sys
+d = [e for e in json.load(open(sys.argv[1])) if e.get("isDefault")]
+e = d[0] if d else {}
+print(e.get("type", "none"), e.get("path", "-"), e.get("triesLeft", "-"))' "$tmp/entries.json")
+if [ "$etype" != type2 ]; then
+  fail "default boot entry is not a UKI (type $etype: $epath)"
+else
+  uki=$epath
+  ok "default entry: $uki"
+  [ "$etries" = 0 ] && warn "default entry has no boot tries left: systemd-boot treats it as bad"
+  if ours "$uki"; then ok "UKI carries exactly one signature, yours"; else fail "UKI is not signed by $CERT alone: $(sbverify --list "$uki" 2>/dev/null | grep -c '^signature [0-9]') signature(s)"; fi
+  ukify --json=short inspect "$uki" > "$tmp/uki.json" 2>/dev/null
+  python3 - "$tmp/uki.json" "$uki" "$tmp" <<'PY'
+import json, struct, sys
+d = json.load(open(sys.argv[1]))
+open(sys.argv[3] + "/sections", "w").write(" ".join(d))
+for s in (".cmdline", ".pcrpkey"):
+    open(f"{sys.argv[3]}/{s[1:]}", "w").write(d.get(s, {}).get("text", ""))
+# Extract .initrd from the PE file.
+b = open(sys.argv[2], "rb").read()
+pe = struct.unpack_from("<I", b, 0x3C)[0]
+nsec, optsz = struct.unpack_from("<H", b, pe + 6)[0], struct.unpack_from("<H", b, pe + 20)[0]
+off = pe + 24 + optsz
+for i in range(nsec):
+    name, vsize, _, rsize, rptr = struct.unpack_from("<8sIIII", b, off + 40 * i)
+    if name.rstrip(b"\0") == b".initrd":
+        open(sys.argv[3] + "/initrd", "wb").write(b[rptr:rptr + min(vsize, rsize)])
+PY
+  secs=$(cat "$tmp/sections")
+  case " $secs " in *" .pcrsig "*) ok "UKI has .pcrsig" ;; *) fail "UKI has no .pcrsig: the signed PCR 11 policy cannot match" ;; esac
+  if [ -f "$PUB" ] && diff -q <(tr -d '\n' < "$tmp/pcrpkey") <(tr -d '\n' < "$PUB") >/dev/null; then
+    ok ".pcrpkey matches $PUB"
+  else
+    fail ".pcrpkey differs from $PUB (or one is missing)"
+  fi
+  want=$(tr -s ' \n' ' ' < /etc/kernel/cmdline 2>/dev/null | sed 's/ $//')
+  have=$(tr -s ' \n' ' ' < "$tmp/cmdline")
+  case "$have" in "$want"*) ok "UKI command line starts with /etc/kernel/cmdline" ;; *) fail "UKI command line differs from /etc/kernel/cmdline: $have" ;; esac
+  if [[ " $have " == *" rd.shell=0 "* && " $have " == *" rd.emergency=halt "* ]]; then ok "rd.shell=0 rd.emergency=halt set"; else warn "no rd.shell=0 rd.emergency=halt on the command line"; fi
+  if [ -s "$tmp/initrd" ] && lsinitrd "$tmp/initrd" 2>/dev/null | grep -q 'systemd-pcrphase'; then
+    ok "initrd contains systemd-pcrphase"
+  else
+    fail "initrd has no systemd-pcrphase (or could not be read): the signed PCR 11 policy cannot match"
+  fi
+fi
+
+# Boot files on the ESP
+if [ -f /etc/kernel/esp-signing.conf ]; then
+  for f in $(. /etc/kernel/esp-signing.conf; echo "$FILES"); do
+    [ -f "$f" ] || continue
+    if ours "$f"; then ok "signed by you: $f"; else fail "not signed by you alone: $f (run resign-esp)"; fi
+  done
+else
+  warn "no /etc/kernel/esp-signing.conf: boot loader files not checked"
+fi
+
+# initrd generator
+if dpkg-query -W -f='${db:Status-Abbrev}' initramfs-tools 2>/dev/null | grep -q '^ii'; then
+  fail "initramfs-tools is installed: it replaces dracut and the next UKI has no TPM unlock"
+else
+  ok "initramfs-tools not installed"
+fi
+
+# LUKS token
+for dev in $(awk '!/^#/ && /tpm2-device=/ { print $2 }' /etc/crypttab); do
+  dev=$(findfs "$dev" 2>/dev/null || echo "$dev")
+  if cryptsetup luksDump "$dev" 2>/dev/null | grep -q 'systemd-tpm2'; then ok "TPM2 token on $dev"; else fail "no systemd-tpm2 token on $dev"; fi
+  # A pcrlock token is bound to one NV index. "systemd-pcrlock remove-policy" deletes it and the next
+  # make-policy creates a new one: the token then finds no policy until it is enrolled again.
+  if [ -f /var/lib/systemd/pcrlock.json ]; then
+    for id in $(cryptsetup luksDump "$dev" 2>/dev/null | sed -n 's/^ *\([0-9]\+\): systemd-tpm2$/\1/p'); do
+      cryptsetup token export --token-id "$id" "$dev" 2>/dev/null > "$tmp/token.json"
+      r=$(python3 - "$tmp/token.json" <<'PY'
+import base64, json, sys
+t = json.load(open(sys.argv[1]))
+if not t.get("tpm2_pcrlock"):
+    print("skip"); sys.exit()
+nv = t.get("tpm2_pcrlock_nv")
+have = int.from_bytes(base64.b64decode(nv)[:4], "big") if nv else None
+want = json.load(open("/var/lib/systemd/pcrlock.json"))["nvIndex"]
+print("ok" if have == want else f"token NV index {hex(have) if have else 'unknown'}, policy NV index {hex(want)}")
+PY
+)
+      case $r in
+        ok) ok "token $id uses the policy's NV index" ;;
+        skip) ;;
+        *) fail "token $id on $dev does not match the policy ($r): the policy was removed and made again. Enroll the TPM again: systemd-cryptenroll --wipe-slot=tpm2 --tpm2-device=auto --tpm2-pcrlock=/var/lib/systemd/pcrlock.json --tpm2-public-key=<PCR public key> --tpm2-public-key-pcrs=11 --tpm2-pcrs= $dev" ;;
+      esac
+    done
+  fi
+done
+
+# pcrlock policy
+if [ -f /var/lib/systemd/pcrlock.json ]; then
+  if [ -f /etc/kernel/pcrlock-pcrs ]; then . /etc/kernel/pcrlock-pcrs
+  else   # no list file: use the PCRs of the policy in force
+    PCRS=$(python3 -c 'import json; print(",".join(str(p) for p in sorted({v["pcr"] for v in json.load(open("/var/lib/systemd/pcrlock.json"))["pcrValues"]})))')
+  fi
+  # This boot's PCR values against the policy in force.
+  bad=$(python3 -c '
+import json
+for e in json.load(open("/var/lib/systemd/pcrlock.json"))["pcrValues"]:
+    cur = open("/sys/class/tpm/tpm0/pcr-sha256/%d" % e["pcr"]).read().strip().lower()
+    if cur not in e["values"]: print(e["pcr"], end=" ")')
+  if [ -z "$bad" ]; then ok "this boot's PCRs $PCRS satisfy the pcrlock policy"; else warn "this boot's PCRs $bad do not satisfy the pcrlock policy (re-lock pending?)"; fi
+  [ -f /var/lib/pcrlock-update.open ] && warn "pcrlock-update is open: only PCRs $(cat /var/lib/pcrlock-update.open) are locked; run 'pcrlock-update close' after the planned change has booted"
+  # Every value pcrlock predicts from the recorded components must be in the policy in the TPM.
+  "$P" predict --pcr="$PCRS" --json=short > "$tmp/predict.json" 2>/dev/null
+  if python3 - "$tmp/predict.json" /var/lib/systemd/pcrlock.json <<'PY'
+import json, sys
+pred = {e["pcr"]: set(e["values"]) for e in json.load(open(sys.argv[1])).get("sha256", [])}
+pol = json.load(open(sys.argv[2]))
+have = {e["pcr"]: set(e["values"]) for e in pol["pcrValues"]}
+# A PCR pcrlock could not predict counts as a mismatch, so an empty or failed prediction never passes.
+missing = [p for p in have if p not in pred or not pred[p] <= have[p]]
+sys.exit(1 if missing or not have else 0)
+PY
+  then ok "policy in the TPM covers every recorded component"
+  else fail "recorded components changed since the last make-policy: run 'pcrlock-update close' (or make-policy) before rebooting"
+  fi
+  # The initrd reads the policy from a credential on the ESP; without it the TPM token is skipped.
+  esp=$(bootctl --print-esp-path 2>/dev/null || echo /boot/efi)
+  cred=$(ls -t "$esp"/loader/credentials/pcrlock.*.cred 2>/dev/null | head -1)
+  if [ -z "$cred" ]; then
+    fail "no pcrlock credential in $esp/loader/credentials/: the initrd will not find the policy (\"Couldn't find pcrlock policy for volume\"). Run make-policy again"
+  elif [ "$(stat -c %Y "$cred")" -lt "$(( $(stat -c %Y /var/lib/systemd/pcrlock.json) - 120 ))" ]; then
+    warn "pcrlock credential $cred is older than /var/lib/systemd/pcrlock.json"
+  else
+    ok "pcrlock credential present: $cred"
+  fi
+  # PCR 7: Secure Boot variables now versus what was recorded.
+  "$P" lock-secureboot-policy --pcrlock="$tmp/sb.pcrlock" >/dev/null 2>&1
+  same=no
+  for f in /var/lib/pcrlock.d/240-secureboot-policy.pcrlock.d/*.pcrlock; do cmp -s "$tmp/sb.pcrlock" "$f" && same=yes; done
+  if [ $same = yes ]; then ok "PCR 7: SecureBoot, PK, KEK, db, dbx match a recorded variant"
+  else fail "PCR 7: Secure Boot variables (PK, KEK, db or dbx) changed and are not recorded; the next boot will ask for the passphrase. Run 'pcrlock-update close'"
+  fi
+  # PCR 1: boot entries and boot order now versus what this boot's firmware measured.
+  locked=$(cat /var/lib/pcrlock-update.open 2>/dev/null || echo "$PCRS")
+  if [[ ",$locked," == *,1,* ]]; then
+    tpm2_eventlog /sys/kernel/security/tpm0/binary_bios_measurements > "$tmp/log.yaml" 2>/dev/null
+    if out=$(python3 - "$tmp/log.yaml" <<'PY'
+# Compare digests, not decoded data: tpm2_eventlog prints EV_EFI_VARIABLE_BOOT2 data as a parsed load
+# option on some firmware. The digest is sha256 of the variable data (EV_EFI_VARIABLE_BOOT, edk2)
+# or of the whole UEFI_VARIABLE_DATA structure (EV_EFI_VARIABLE_BOOT2).
+import hashlib, os, struct, sys, uuid
+G = "8be4df61-93ca-11d2-aa0d-00e098032b8c"
+events, ev = [], None
+for line in open(sys.argv[1]):
+    l = line.strip()
+    if l.startswith("EventType:"):
+        ev = {} if l.split()[1] in ("EV_EFI_VARIABLE_BOOT", "EV_EFI_VARIABLE_BOOT2") else None
+        if ev is not None:
+            events.append(ev)
+    elif ev is not None:
+        if l.startswith("- AlgorithmId:") or l.startswith("AlgorithmId:"):
+            ev["alg"] = l.split()[-1]
+        elif l.startswith("Digest:") and ev.get("alg") == "sha256" and "digest" not in ev:
+            ev["digest"] = l.split(None, 1)[1].strip('"').lower()
+        elif l.startswith("UnicodeName:") and "name" not in ev:
+            ev["name"] = l.split(None, 1)[1].strip('"')
+diffs = []
+for ev in events:
+    name, want = ev.get("name"), ev.get("digest")
+    if not name or not want:
+        continue
+    path = f"/sys/firmware/efi/efivars/{name}-{G}"
+    if not os.path.exists(path):
+        diffs.append(name + " (deleted)")
+        continue
+    data = open(path, "rb").read()[4:]
+    full = uuid.UUID(G).bytes_le + struct.pack("<QQ", len(name), len(data)) + name.encode("utf-16-le") + data
+    if want not in (hashlib.sha256(data).hexdigest(), hashlib.sha256(full).hexdigest()):
+        diffs.append(name)
+if not events:
+    print("no boot variable events in the TPM log")
+    sys.exit(1)
+print(" ".join(diffs))
+sys.exit(1 if diffs else 0)
+PY
+    ); then ok "PCR 1: boot entries and boot order unchanged since this boot"
+    else fail "PCR 1: changed since this boot: ${out}. The next boot will ask for the passphrase unless you run 'pcrlock-update open 1' first, then 'close' after"
+    fi
+  fi
+else
+  warn "no pcrlock policy (/var/lib/systemd/pcrlock.json): PCR checks skipped"
+fi
+
+echo
+if [ "$fails" = 0 ]; then echo "next boot: no problem found"; else echo "next boot: $fails problem(s) found"; fi
+exit $((fails > 0))

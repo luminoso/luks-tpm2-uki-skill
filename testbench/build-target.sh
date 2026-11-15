@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs as root inside the builder VM. Installs a stock Debian 13 onto /dev/nvme0n1 with the
+# Runs as root inside the builder VM. Installs a stock Debian (13 by default, SUITE=forky for testing) onto /dev/nvme0n1 with the
 # layout the guide assumes: ESP p1, LUKS2 p2 (btrfs, subvolume @rootfs), plus an ext4 /boot (p3)
 # so the stock GRUB boot works before the guide moves everything to systemd-boot + UKI.
 set -euxo pipefail
@@ -7,6 +7,7 @@ D=/dev/nvme0n1
 PASS=testpass
 MAP=nvme0n1p2_crypt
 MIRROR=http://deb.debian.org/debian
+SUITE=${SUITE:-trixie}     # forky = Debian testing
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
@@ -29,16 +30,16 @@ mount -o subvol=@rootfs /dev/mapper/$MAP /mnt
 mkdir -p /mnt/boot && mount ${D}p3 /mnt/boot
 mkdir -p /mnt/boot/efi && mount ${D}p1 /mnt/boot/efi
 
-debootstrap --include=ca-certificates,locales,openssh-server,sudo,less,curl trixie /mnt $MIRROR
+debootstrap --include=ca-certificates,locales,openssh-server,sudo,less,curl $SUITE /mnt $MIRROR
 
 LUKS_UUID=$(cryptsetup luksUUID ${D}p2)
 BOOT_UUID=$(blkid -s UUID -o value ${D}p3)
 ESP_UUID=$(blkid -s UUID -o value ${D}p1)
 
 cat > /mnt/etc/apt/sources.list <<EOF
-deb $MIRROR trixie main contrib non-free-firmware
-deb $MIRROR trixie-updates main contrib non-free-firmware
-deb http://security.debian.org/debian-security trixie-security main contrib non-free-firmware
+deb $MIRROR $SUITE main contrib non-free-firmware
+deb $MIRROR $SUITE-updates main contrib non-free-firmware
+deb http://security.debian.org/debian-security $SUITE-security main contrib non-free-firmware
 EOF
 # Same shape d-i writes for a manually partitioned LUKS + btrfs install.
 cat > /mnt/etc/fstab <<EOF

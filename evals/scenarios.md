@@ -23,3 +23,17 @@ See `scenario-b-facts.md` for the host facts. Prompt:
 > You are auditing a Linux host's TPM2 automatic disk decryption setup for its owner. Answer from your own knowledge and the facts below only; do not run commands, do not browse the web, do not read local files. Produce a prioritized list of findings (what is wrong or risky, why, and the fix), most severe first.
 >
 > (facts from scenario-b-facts.md)
+
+## Scenario C: server without DKMS, operations
+
+> You are helping a Linux user. Answer from your own knowledge; do not run commands, do not browse the web, do not read local files. Give a concrete, actionable answer as you would to the user.
+>
+> The user says:
+>
+> "I run a headless Debian 13 server (stock kernel, no NVIDIA, no ZFS, no out-of-tree modules) with LUKS2 on /dev/nvme0n1p2 and btrfs inside, ESP on /boot/efi. It has IPMI, but nobody watches the console. It reboots unattended after kernel updates. I want the disk to open from the TPM without a PIN, my own Secure Boot keys, a signed UKI and systemd-boot. Three more things: next month I have to flash a BIOS update and I don't want to end up at a passphrase prompt; I want to know when an unattended reboot did end at the passphrase prompt; and if a new kernel doesn't boot, I'd like the machine to fall back by itself.
+>
+> Give me the plan: boot chain, packages, PCRs, enrollment commands, and how to handle the BIOS update, the alerting and the fallback."
+>
+> Write the plan with exact commands. Be specific.
+
+With the skill, prepend the same line as in scenario A.

@@ -1,0 +1,60 @@
+#!/bin/bash
+# pcrlock-update: change the TPM policy around a planned firmware update or BIOS setting change,
+# so the next boot opens the disk without the passphrase.
+#
+#   pcrlock-update open 0,2   before the change: lock only the PCRs not listed (PCR 7 always stays)
+#   pcrlock-update close      after the first boot on the new state: re-record everything, lock the full list
+#   pcrlock-update status
+#
+# Install as /usr/local/sbin/pcrlock-update. The full PCR list comes from /etc/kernel/pcrlock-pcrs (PCRS=...).
+# Neither step asks for the recovery PIN as long as the current boot satisfies the policy in force;
+# otherwise it asks once (tested in the VM with systemd 257).
+set -euo pipefail
+P=/usr/lib/systemd/systemd-pcrlock
+STATE=/var/lib/pcrlock-update.open
+. /etc/kernel/pcrlock-pcrs
+
+policy() {   # $1 = PCR list
+  local out
+  # Without --recovery-pin the TPM accepts the update while this boot still matches the policy in force,
+  # and the PIN stays the same. --recovery-pin=query always uses the PIN, so it is only the fallback.
+  if ! out=$("$P" make-policy --pcr="$1" 2>&1); then
+    echo "This boot does not match the policy in force. Enter the recovery PIN." >&2
+    local t; t=$(mktemp)
+    "$P" make-policy --pcr="$1" --recovery-pin=query 2>&1 | tee "$t" >&2 || { rm -f "$t"; exit 1; }   # prompt stays visible
+    out=$(cat "$t"); rm -f "$t"
+  fi
+  echo "$out" | grep -E 'protection mask|Prediction is identical|NV index'
+  echo "$out" | grep -q 'PCRs in protection mask:.*\b7 (secure-boot-policy)' \
+    || { echo "pcrlock-update: PCR 7 is not in the new policy. Stop and find out why." >&2; exit 1; }
+}
+
+case ${1:-status} in
+open)
+  [ -n "${2:-}" ] || { echo "usage: $0 open PCR[,PCR...]" >&2; exit 2; }
+  case ",$2," in *,7,*) echo "pcrlock-update: PCR 7 cannot be dropped" >&2; exit 2 ;; esac
+  keep=$(tr , '\n' <<<"$PCRS" | grep -vxF -f <(tr , '\n' <<<"$2") | paste -sd, -)
+  policy "$keep"
+  echo "$keep" > "$STATE"
+  echo "Policy now locks PCRs $keep only. Make the change, boot once, then run: $0 close"
+  ;;
+close)
+  "$P" lock-firmware-code
+  "$P" lock-firmware-config
+  "$P" lock-secureboot-policy
+  "$P" lock-secureboot-authority
+  "$P" lock-gpt
+  policy "$PCRS"
+  rm -f "$STATE"
+  echo "Policy locks PCRs $PCRS again."
+  ;;
+status)
+  echo "Full list: $PCRS"
+  if [ -f "$STATE" ]; then
+    echo "OPEN since $(date -r "$STATE" '+%F %T'): only PCRs $(cat "$STATE") are locked. Run '$0 close' after the change."
+  else
+    echo "Closed: the policy locks the full list."
+  fi
+  ;;
+*) echo "usage: $0 open PCR[,PCR...] | close | status" >&2; exit 2 ;;
+esac

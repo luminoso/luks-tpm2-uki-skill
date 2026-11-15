@@ -153,6 +153,23 @@ if needroot; then
   [ -r /run/log/systemd/tpm2-measure.log ] && echo "enter-initrd measured: $(grep -c enter-initrd /run/log/systemd/tpm2-measure.log) time(s)"
 fi
 
+sec "Operations: recovery, alerts, boot counting, next boot"
+echo "boot counting: /etc/kernel/tries = $(cat /etc/kernel/tries 2>/dev/null || echo 'not set')"
+ls "$ESP"/EFI/Linux/ 2>/dev/null | grep -E '\+[0-9]+(-[0-9]+)?\.efi$' | sed 's/^/  counted UKI: /'
+for f in check-next-boot pcrlock-update tpm-unlock-check; do
+  printf '%s: %s\n' "$f" "$(command -v "$f" || echo 'not installed')"
+done
+echo "tpm-unlock-check.service: $(systemctl is-enabled tpm-unlock-check.service 2>/dev/null || echo 'not installed')"
+[ -f /var/lib/pcrlock-update.open ] && echo "pcrlock-update OPEN since $(date -r /var/lib/pcrlock-update.open '+%F %T'): locks only $(cat /var/lib/pcrlock-update.open)"
+echo "pcrlock PCR list file: $(cat /etc/kernel/pcrlock-pcrs 2>/dev/null || echo 'none (/etc/kernel/pcrlock-pcrs)')"
+if needroot; then
+  for src in $(awk '!/^#/ && /tpm2-device=/ { print $2 }' /etc/crypttab 2>/dev/null); do
+    dev=$(findfs "$src" 2>/dev/null || echo "$src")
+    printf 'recovery key on %s: %s\n' "$dev" "$(cryptsetup luksDump "$dev" 2>/dev/null | grep -c 'systemd-recovery' | sed 's/^0$/none/; s/^[1-9]$/enrolled/')"
+  done
+  if command -v check-next-boot >/dev/null; then echo "--- check-next-boot"; check-next-boot 2>&1; fi
+fi
+
 sec "Option ROMs in the TPM event log"
 if needroot && [ -x /usr/lib/systemd/systemd-pcrlock ]; then
   echo "boot-services drivers (option ROMs) measured: $(/usr/lib/systemd/systemd-pcrlock log 2>/dev/null | grep -c 'efi-boot-services-driver')"

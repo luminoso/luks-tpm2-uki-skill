@@ -1,4 +1,5 @@
-# Build a trivial module, sign it with the DKMS key, load it. Proves MOK keys reach the kernel.
+# Build a trivial module, sign it with KEY/CERT (default: the DKMS key), try to load it.
+# Last line: INSMOD-OK or INSMOD-REJECTED. Shows whether the kernel trusts that key for modules.
 set -eux
 export DEBIAN_FRONTEND=noninteractive
 V=$(uname -r)
@@ -14,8 +15,11 @@ module_init(h);
 module_exit(b);
 C
 echo "obj-m := hello.o" > Makefile
+rm -f hello.ko hello.o     # fresh, unsigned build
 make -s -C "/lib/modules/$V/build" M="$PWD" modules
-"/usr/src/linux-headers-$V/scripts/sign-file" sha256 /var/lib/dkms/mok.key /var/lib/dkms/mok.pub hello.ko
 rmmod hello 2>/dev/null || true
-insmod hello.ko
-echo INSMOD-OK
+# Control: the same module unsigned must be refused, or the test proves nothing.
+cp hello.ko hello-unsigned.ko
+if insmod hello-unsigned.ko 2>/dev/null; then rmmod hello; echo "ENFORCEMENT-OFF"; exit 1; fi
+"/usr/src/linux-headers-$V/scripts/sign-file" sha256 "${KEY:-/var/lib/dkms/mok.key}" "${CERT:-/var/lib/dkms/mok.pub}" hello.ko
+if insmod hello.ko; then echo INSMOD-OK; else echo INSMOD-REJECTED; fi

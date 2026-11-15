@@ -21,11 +21,16 @@ These are systemd components and behave the same wherever systemd 255 or newer s
 | Does the generator include `systemd-pcrphase`? | Look inside the built initrd (`lsinitrd`, `lsinitcpio`); after a boot, `systemctl status systemd-pcrphase-initrd` | Without it the signed PCR 11 policy never matches |
 | Can something replace the generator behind your back? | Which packages depend on or recommend the distribution's default generator | Debian: microcode recommends initramfs-tools and swapped dracut out |
 | Do kernel installs go through `kernel-install`? | Kernel package post-install scripts; `/etc/kernel/postinst.d`; pacman or dnf hooks | Otherwise UKIs are not rebuilt and signed on kernel updates |
-| Does the kernel trust `db` certificates for module signatures? | Sign a test module with a key that is only in `db` and `insmod` it (`testbench/tests/dkms-insmod.sh` shows how) | Decides between the no-shim chain and shim + MOK when DKMS is needed |
+| Does the kernel trust `db` certificates for module signatures? | `KEY=<db key> CERT=<db cert> bash testbench/tests/dkms-insmod.sh` signs a test module with the `db` key and loads it, after checking that the unsigned module is refused | Decides between the no-shim chain and shim + MOK when DKMS is needed. Debian 13 and Proxmox VE 9: trusted |
 | Is sbctl packaged? | Package search | On Debian it is not |
 | How do package hooks run after updates? | apt: `DPkg::Post-Invoke`; pacman: `/etc/pacman.d/hooks`; dnf: actions plugin | The re-sign hook must run after every update that touches boot files |
 | Does the systemd-boot or shim package copy files to the ESP on update, and which ones? | Its post-install script | Those are the files the re-sign hook must cover |
 | Which certificate is built into the distribution's shim? | `mokutil --export`, or the shim package's certificate file | That is the certificate to deny in MokListX |
+
+## Observed on Debian testing (forky, November 2026)
+
+- systemd 262 moved `systemd-pcrlock`, `systemd-pcrextend` and the `systemd-pcrphase*` units into a new package, `systemd-tpm`. Without it nothing measures the boot phase.
+- dracut 112 names the module `systemd-pcrextend`; `add_dracutmodules+=" systemd-pcrphase "` fails the build.
 
 ## Observed on Proxmox VE 9
 

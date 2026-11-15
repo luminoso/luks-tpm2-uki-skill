@@ -9,11 +9,13 @@ echo "$NAME UUID=$UUID none luks,discard,tpm2-device=auto,x-initrd.attach" > /et
 
 echo "rd.luks.name=$UUID=$NAME rd.luks.options=$UUID=tpm2-device=auto,discard root=/dev/mapper/$NAME rootflags=subvol=@rootfs rw quiet rd.shell=0 rd.emergency=halt $EXTRA" > /etc/kernel/cmdline
 
-cat > /etc/dracut.conf.d/50-tpm2-uki.conf <<'C'
+# dracut 106 (Debian 13) calls the module systemd-pcrphase; newer dracut (testing) systemd-pcrextend.
+PCRMOD=systemd-pcrphase; ls -d /usr/lib/dracut/modules.d/*systemd-pcrphase >/dev/null 2>&1 || PCRMOD=systemd-pcrextend
+cat > /etc/dracut.conf.d/50-tpm2-uki.conf <<C
 hostonly="yes"
 hostonly_cmdline="no"
 compress="zstd"
-add_dracutmodules+=" systemd-cryptsetup systemd-pcrphase tpm2-tss btrfs "
+add_dracutmodules+=" systemd-cryptsetup $PCRMOD tpm2-tss btrfs "
 omit_dracutmodules+=" network cifs nfs iscsi nbd "
 C
 
