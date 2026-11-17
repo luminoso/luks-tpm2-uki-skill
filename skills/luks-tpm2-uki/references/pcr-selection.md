@@ -63,7 +63,7 @@ Record the components, then dry-run the policy:
 ```bash
 P=/usr/lib/systemd/systemd-pcrlock
 $P lock-firmware-code; $P lock-firmware-config
-$P lock-secureboot-policy; $P lock-secureboot-authority; $P lock-gpt
+$P lock-secureboot-policy; $P lock-secureboot-authority; $P lock-gpt   # on LVM/dm-crypt root, pass the ESP disk: lock-gpt /dev/nvme0n1
 $P predict 2>&1 | grep -E '^PCR|protection mask'
 ```
 
@@ -101,6 +101,7 @@ $P lock-firmware-code          # firmware update
 $P lock-firmware-config        # settings, boot order
 $P lock-secureboot-policy      # db/dbx/KEK/PK change
 $P lock-secureboot-authority   # shim or signing certificate change
+$P lock-gpt                    # on LVM/dm-crypt root, pass the ESP disk: lock-gpt /dev/nvme0n1
 $P make-policy --pcr=$PCRS --recovery-pin=query
 ```
 
@@ -127,9 +128,11 @@ D=/var/lib/pcrlock.d/240-secureboot-policy.pcrlock.d
 cp $D/generated.pcrlock $D/previous.pcrlock    # old state stays allowed
 # ... make the change (e.g. efi-updatevar on db) ...
 $P lock-secureboot-policy                      # records the new state
-$P make-policy --pcr=$PCRS                     # no PIN needed: the machine still matches the old policy
+$P make-policy --pcr=$PCRS                     # no PIN needed: the machine still matches the old policy (retry if IMA triggers 0x128)
 # reboot (opens automatically), then tighten:
-rm $D/previous.pcrlock && $P make-policy --pcr=$PCRS
+rm $D/previous.pcrlock && $P make-policy --pcr=$PCRS 2>&1 | tee /tmp/mp.out
+grep 'PCRs in protection mask:.*\b7 (secure-boot-policy)' /tmp/mp.out || echo "STOP: PCR 7 not locked (did you reboot first?)"
 ```
 
+Never use `cp` to back up `/sys/firmware/efi/efivars/*` (`cp` fails with `Illegal seek` on `efivarfs`); use `cat /sys/firmware/efi/efivars/db-* > backup` instead.
 Tested in the VM for a `db` rewrite: both reboots opened automatically, and pcrlock retrieved its own PIN from the TPM.

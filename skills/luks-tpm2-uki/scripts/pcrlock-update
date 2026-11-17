@@ -15,16 +15,27 @@ STATE=/var/lib/pcrlock-update.open
 . /etc/kernel/pcrlock-pcrs
 
 policy() {   # $1 = PCR list
-  local out
+  local out i ok=0
   # Without --recovery-pin the TPM accepts the update while this boot still matches the policy in force,
   # and the PIN stays the same. --recovery-pin=query always uses the PIN, so it is only the fallback.
-  if ! out=$("$P" make-policy --pcr="$1" 2>&1); then
+  # Retry on 0x00000128 (TPM_RC_PCR_CHANGED), which happens when IMA (PCR 10) extends a PCR mid-session.
+  for i in 1 2 3; do
+    if out=$("$P" make-policy --pcr="$1" 2>&1); then
+      ok=1
+      break
+    fi
+    case $out in
+      *0x00000128*|*PCR_CHANGED*) sleep 1 ;;
+      *) break ;;
+    esac
+  done
+  if [ "$ok" = 0 ]; then
     echo "This boot does not match the policy in force. Enter the recovery PIN." >&2
     local t; t=$(mktemp)
     "$P" make-policy --pcr="$1" --recovery-pin=query 2>&1 | tee "$t" >&2 || { rm -f "$t"; exit 1; }   # prompt stays visible
     out=$(cat "$t"); rm -f "$t"
   fi
-  echo "$out" | grep -E 'protection mask|Prediction is identical|NV index'
+  echo "$out" | grep -E 'protection mask|Prediction is identical|NV index' || true
   echo "$out" | grep -q 'PCRs in protection mask:.*\b7 (secure-boot-policy)' \
     || { echo "pcrlock-update: PCR 7 is not in the new policy. Stop and find out why." >&2; exit 1; }
 }
@@ -43,7 +54,10 @@ close)
   "$P" lock-firmware-config
   "$P" lock-secureboot-policy
   "$P" lock-secureboot-authority
-  "$P" lock-gpt
+  esp=$(bootctl --print-esp-path 2>/dev/null || findmnt -no TARGET /boot/efi 2>/dev/null || echo /boot/efi)
+  esp_src=$(findmnt -no SOURCE "$esp" 2>/dev/null || true)
+  pk=$([ -n "$esp_src" ] && lsblk -no PKNAME "$esp_src" 2>/dev/null | head -1 || true)
+  if [ -n "$pk" ]; then "$P" lock-gpt "/dev/$pk"; else "$P" lock-gpt; fi
   policy "$PCRS"
   rm -f "$STATE"
   echo "Policy locks PCRs $PCRS again."

@@ -129,13 +129,23 @@ if [ -f /var/lib/systemd/pcrlock.json ]; then
   else   # no list file: use the PCRs of the policy in force
     PCRS=$(python3 -c 'import json; print(",".join(str(p) for p in sorted({v["pcr"] for v in json.load(open("/var/lib/systemd/pcrlock.json"))["pcrValues"]})))')
   fi
+  have_pcrs=$(python3 -c 'import json; print(",".join(str(p) for p in sorted({v["pcr"] for v in json.load(open("/var/lib/systemd/pcrlock.json"))["pcrValues"]})))')
+  want_pcrs=$(cat /var/lib/pcrlock-update.open 2>/dev/null || echo "$PCRS")
+  case ",$have_pcrs," in
+    *,7,*) ;;
+    *) fail "PCR 7 is missing from /var/lib/systemd/pcrlock.json (only $have_pcrs locked): the TPM can release the key with Secure Boot off" ;;
+  esac
+  missing_want=$(tr , '\n' <<<"$want_pcrs" | grep -vxF -f <(tr , '\n' <<<"$have_pcrs") | paste -sd, - || true)
+  if [ -n "$missing_want" ]; then
+    fail "pcrlock policy locks only [$have_pcrs], missing expected PCR(s) [$missing_want] from $([ -f /var/lib/pcrlock-update.open ] && echo /var/lib/pcrlock-update.open || echo /etc/kernel/pcrlock-pcrs)"
+  fi
   # This boot's PCR values against the policy in force.
   bad=$(python3 -c '
 import json
 for e in json.load(open("/var/lib/systemd/pcrlock.json"))["pcrValues"]:
     cur = open("/sys/class/tpm/tpm0/pcr-sha256/%d" % e["pcr"]).read().strip().lower()
     if cur not in e["values"]: print(e["pcr"], end=" ")')
-  if [ -z "$bad" ]; then ok "this boot's PCRs $PCRS satisfy the pcrlock policy"; else warn "this boot's PCRs $bad do not satisfy the pcrlock policy (re-lock pending?)"; fi
+  if [ -z "$bad" ]; then ok "this boot's PCRs $have_pcrs satisfy the pcrlock policy"; else warn "this boot's PCRs $bad do not satisfy the pcrlock policy (re-lock pending?)"; fi
   [ -f /var/lib/pcrlock-update.open ] && warn "pcrlock-update is open: only PCRs $(cat /var/lib/pcrlock-update.open) are locked; run 'pcrlock-update close' after the planned change has booted"
   # Every value pcrlock predicts from the recorded components must be in the policy in the TPM.
   "$P" predict --pcr="$PCRS" --json=short > "$tmp/predict.json" 2>/dev/null

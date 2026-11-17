@@ -129,6 +129,11 @@ echo "--- apt hooks that run after dpkg"; grep -rl 'Post-Invoke' /etc/apt/apt.co
 echo "--- apt preferences"; ls /etc/apt/preferences.d 2>/dev/null
 for f in /usr/local/sbin/resign-esp /etc/kernel/esp-signing.conf; do [ -e "$f" ] && echo "present: $f"; done
 [ -e /etc/kernel/esp-signing.conf ] && cat /etc/kernel/esp-signing.conf
+if dpkg-query -W -f='${db:Status-Abbrev}' grub-efi-amd64 2>/dev/null | grep -q '^ii'; then
+  echo "grub-efi-amd64 manual: $(apt-mark showmanual grub-efi-amd64 2>/dev/null || echo no)"
+  echo "grub core.efi: $([ -e /boot/grub/x86_64-efi/core.efi ] && echo PRESENT || echo absent)"
+  needroot && have debconf-show && debconf-show grub-efi-amd64 grub2-common 2>/dev/null | grep -E 'update_nvram|force_efi_extra_removable'
+fi
 
 sec "DKMS and kernel module trust"
 echo "lockdown: $(cat /sys/kernel/security/lockdown 2>/dev/null)"
@@ -139,6 +144,11 @@ for m in /lib/modules/"$(uname -r)"/updates/dkms/*.ko*; do
   printf '%s: signer=%s, loaded=%s\n' "$(basename "$m")" "$("$MODINFO" -F signer "$m" 2>/dev/null)" "$(grep -q "^$(basename "$m" | sed 's/\.ko.*//; s/-/_/g') " /proc/modules && echo yes || echo no)"
 done
 grep -s '' /etc/dkms/framework.conf.d/*.conf | grep -E 'mok_' || echo "dkms signing key: default (/var/lib/dkms/mok.key)"
+if [ "$ROOT" = yes ]; then
+  for f in $(grep -hsE '^\s*mok_(signing_key|certificate)=' /etc/dkms/framework.conf.d/*.conf | cut -d= -f2); do
+    [ -e "$f" ] || echo "WARN: configured DKMS file missing: $f (dkms overwrites mok_signing_key if mok_certificate is missing)"
+  done
+fi
 
 sec "Private keys stored on this host (names only)"
 if needroot; then

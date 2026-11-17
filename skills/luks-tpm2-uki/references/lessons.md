@@ -16,6 +16,10 @@ Each entry: what happened, why, what fixed it. "VM" means the QEMU/OVMF/swtpm te
 - `systemd-pcrlock remove-policy` followed by `make-policy` creates a new NV index; the LUKS token still names the old one (`tpm2_pcrlock_nv` in `cryptsetup token export`). The next boot printed "No pcrlock policy found among system credentials. Couldn't find pcrlock policy for volume." and asked for the passphrase. Host, then reproduced in the VM; `systemd-cryptenroll --wipe-slot=tpm2 ...` against the new policy fixed it. To re-lock, run `make-policy` again: it updates the same NV index. `check-next-boot` now compares the token's NV index with the policy's.
 - Some firmware creates its own boot entry for `EFI/BOOT/BOOTX64.EFI` once that file appears ("UEFI OS", optional data `BO`). On a UGREEN DXP2800 that changed the boot entries and BootOrder, so PCR 1, on the next boot: the disk asked for the passphrase. Host. Before adding the fallback loader on a host that locks PCR 1, `pcrlock-update open 1`, boot once, then `close`; or leave PCR 1 out.
 - A `db` entry appended with `efi-updatevar` and recorded with `lock-secureboot-policy` + `make-policy` before the reboot opened automatically; not recording it prompted. VM.
+- On Proxmox VE 9.2 with IMA active (PCR 10 non-zero), `systemd-pcrlock make-policy` failed with `Esys_PolicyPCR ... ErrorCode (0x00000128)` (`TPM_RC_PCR_CHANGED`) when IMA measured a file mid-session; retrying immediately succeeded. Host.
+- On an LVM-on-LUKS host, `systemd-pcrlock lock-gpt` with no argument failed (`Disk does not have GPT partition table, refusing.`) because `/` is a logical volume; passing the ESP's physical disk (`/dev/nvme0n1`) succeeded. Host.
+- Removing `previous.pcrlock` and running `make-policy` on the same boot before rebooting onto the new `db` dropped PCR 7 from `pcrlock.json` (`Event log record ... not matching any component`). `check-next-boot` previously iterated only `pcrlock.json`'s keys and still exited 0; fixed `check-next-boot` to fail if PCR 7 or any expected PCR from `pcrlock-pcrs` is missing. Host.
+- `cp /sys/firmware/efi/efivars/db-*` failed with `Illegal seek` on `efivarfs`; `cat ... > backup` worked. Host.
 
 ## Boot chain
 
@@ -54,6 +58,7 @@ Each entry: what happened, why, what fixed it. "VM" means the QEMU/OVMF/swtpm te
 - Debian's kernel accepts modules signed by a key that is only in firmware `db`, without shim. VM, kernel 6.12 with Secure Boot on and lockdown `integrity`: the `db`-signed module loaded; the same module unsigned, and signed with a random key, was refused (`Key was rejected by service`). A real DKMS module signed with the `db` key (`/etc/dkms/framework.conf.d/db-key.conf`) loaded, and was rebuilt and loaded after the upgrade to 7.2.
 - Mistake made and corrected: an earlier no-shim run signed the test module with the DKMS key, which was enrolled nowhere, saw `Key was rejected by service`, and concluded that Debian ignores `db` for modules. A module test needs two controls: the same module unsigned must be refused, and the signing key must be the one actually enrolled.
 - The Proxmox kernel loaded a DKMS module signed by a certificate that was only in `db`. Host.
+- Switching an existing DKMS module from `/var/lib/dkms/mok.key` to `db.key` required `dkms build --force` + `dkms install --force` (DKMS signs during `build`, not `install`), and failed on an older kernel lacking `/lib/modules/<kver>/build` headers. Host.
 
 ## Test bench pitfalls
 

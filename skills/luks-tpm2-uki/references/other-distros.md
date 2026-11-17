@@ -40,6 +40,9 @@ These are systemd components and behave the same wherever systemd 255 or newer s
 - Do not remove GRUB: `zz-proxmox-boot` fails every kernel install and removal when booted in EFI mode without `grub-efi-amd64`. Keep it installed, marked manual, with `grub2/update_nvram false` and `grub2/force_efi_extra_removable false`. Without `/boot/grub/x86_64-efi/core.efi` its package scripts never run `grub-install`.
 - `shim-signed` may be left in state `ic` (install requested, only config files) after its pre-install script refused under your own keys. Pin it to -1; do not purge it if `EFI/proxmox` or `EFI/debian` exists on the ESP, because its postrm then runs `grub-install`.
 - `proxmox-boot-tool`'s hook (`zz-proxmox-boot`) does nothing unless `/etc/kernel/proxmox-boot-uuids` exists. Check before adding ESPs to it, since it manages its own copies.
+- Proxmox VE 9's kernel runs with IMA active (PCR 10 non-zero). `systemd-pcrlock make-policy` can fail mid-session with `Esys_PolicyPCR ... ErrorCode (0x00000128)` (`TPM_RC_PCR_CHANGED`) when an IMA measurement bumps the TPM PCR update counter; an immediate retry (as in `scripts/pcrlock-update`) succeeds.
+- On an LVM-on-LUKS layout (Proxmox root on `pve/root` or `debian-vg/debian-root`), `systemd-pcrlock lock-gpt` with no path inspects `/` and fails with `Disk does not have GPT partition table, refusing.`; pass the ESP's parent disk (`lock-gpt /dev/nvme0n1`).
+- When migrating existing DKMS modules from `/var/lib/dkms/mok.key` to `db.key`, `dkms` signs only during `build` (`dkms build --force` then `dkms install --force`), needs kernel headers (`/lib/modules/<kver>/build`) for every retained kernel, and overwrites `mok_signing_key` with a new self-signed key if `mok_certificate` is missing.
 
 ## When the target is not Debian
 
